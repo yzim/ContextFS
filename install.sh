@@ -112,8 +112,15 @@ done
 echo
 echo "Installed agentvfs $VERSION to $PREFIX"
 echo
-echo "next: agentvfs-quickstart /path/to/project"
 case ":$PATH:" in
-    *":$PREFIX:"*) : ;;
-    *) echo "  (add $PREFIX to PATH if it isn't already)" ;;
+    *":$PREFIX:"*)
+        echo "next: agentvfs-quickstart /path/to/project"
+        ;;
+    *)
+        echo "Note: $PREFIX is not in your PATH. Add it:"
+        echo "  export PATH=\"$PREFIX:\$PATH\""
+        echo "  echo 'export PATH=\"$PREFIX:\$PATH\"' >> ~/.bashrc   # or ~/.zshrc"
+        echo
+        echo "Then: agentvfs-quickstart /path/to/project"
+        ;;
 esac

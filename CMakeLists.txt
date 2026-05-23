@@ -4,6 +4,14 @@ project(agentvfs LANGUAGES C CXX)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
+# Version reported by `agentvfs --version`. Override at configure time:
+#   cmake -B build -DAGENTVFS_VERSION_STRING=0.1.2
+# release.yml passes the tag (with the leading 'v' stripped) here.
+if(NOT DEFINED AGENTVFS_VERSION_STRING)
+    set(AGENTVFS_VERSION_STRING "0.1.2-dev")
+endif()
+add_compile_definitions(AGENTVFS_VERSION_STRING="${AGENTVFS_VERSION_STRING}")
+
 # Polyfill the CMake 3.25+ LINUX variable so the if(LINUX) gates below
 # also work on the distros shipping CMake 3.16–3.24 (Ubuntu 22.04 = 3.22,
 # Debian 11 = 3.18, RHEL 9 = 3.20). APPLE / WIN32 / UNIX are defined by

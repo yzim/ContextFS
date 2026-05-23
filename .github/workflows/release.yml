@@ -16,7 +16,9 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y libfuse3-dev fuse3
       - name: Build
         run: |
-          cmake -B build -DAGENTVFS_EBPF=OFF -DCMAKE_BUILD_TYPE=Release
+          version="${GITHUB_REF_NAME#v}"
+          cmake -B build -DAGENTVFS_EBPF=OFF -DCMAKE_BUILD_TYPE=Release \
+                -DAGENTVFS_VERSION_STRING="${version}"
           cmake --build build -j
       - name: Package
         run: |
@@ -39,7 +41,9 @@ jobs:
       - run: brew install --cask macos-fuse-t/cask/fuse-t
       - name: Build
         run: |
-          cmake -B build -DAGENTVFS_EBPF=OFF -DAGENTVFS_FUSE_T=ON -DCMAKE_BUILD_TYPE=Release
+          version="${GITHUB_REF_NAME#v}"
+          cmake -B build -DAGENTVFS_EBPF=OFF -DAGENTVFS_FUSE_T=ON -DCMAKE_BUILD_TYPE=Release \
+                -DAGENTVFS_VERSION_STRING="${version}"
           cmake --build build -j
       - name: Package
         run: |
@@ -62,7 +66,9 @@ jobs:
       - run: brew install --cask macos-fuse-t/cask/fuse-t
       - name: Build
         run: |
-          cmake -B build -DAGENTVFS_EBPF=OFF -DAGENTVFS_FUSE_T=ON -DCMAKE_BUILD_TYPE=Release
+          version="${GITHUB_REF_NAME#v}"
+          cmake -B build -DAGENTVFS_EBPF=OFF -DAGENTVFS_FUSE_T=ON -DCMAKE_BUILD_TYPE=Release \
+                -DAGENTVFS_VERSION_STRING="${version}"
           cmake --build build -j
       - name: Package
         run: |
@@ -85,8 +91,11 @@ jobs:
       - run: choco install winfsp -y --no-progress
         shell: powershell
       - name: Build
+        shell: bash
         run: |
-          cmake -B build -DAGENTVFS_EBPF=OFF -DAGENTVFS_WINFSP=ON -DCMAKE_BUILD_TYPE=Release
+          version="${GITHUB_REF_NAME#v}"
+          cmake -B build -DAGENTVFS_EBPF=OFF -DAGENTVFS_WINFSP=ON -DCMAKE_BUILD_TYPE=Release \
+                -DAGENTVFS_VERSION_STRING="${version}"
           cmake --build build --config Release -j
       - name: Package
         shell: powershell

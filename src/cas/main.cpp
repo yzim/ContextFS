@@ -90,69 +90,100 @@ static std::vector<std::string> split_csv(const std::string& s) {
     return false;
 }
 
-[[maybe_unused]] static void print_backend_name(const char* name, bool& first) {
-    std::fprintf(stderr, "%s%s", first ? "" : ", ", name);
+#ifndef AGENTVFS_VERSION_STRING
+#define AGENTVFS_VERSION_STRING "0.1.2"
+#endif
+
+[[maybe_unused]] static void print_backend_name(FILE* stream, const char* name, bool& first) {
+    std::fprintf(stream, "%s%s", first ? "" : ", ", name);
     first = false;
 }
 
-static void usage() {
-    std::fprintf(stderr,
-        "Usage: agentvfs --source <dir> --mountpoint <dir> "
-        "[--store <dir>] [--control-sock <path>] [-f] [-s]\n"
+static void usage(FILE* stream) {
+    std::fprintf(stream,
+        "agentvfs - checkpointable, branchable FUSE workspace for AI agents.\n"
+        "\n"
+        "Usage:\n"
+        "  agentvfs --source <dir> --mountpoint <dir> [options]\n"
+        "  agentvfs workspace <subcommand> [args]   (run without args to list subcommands)\n"
+        "\n"
+        "Required:\n"
+        "  --source <dir>         project directory to mount\n"
+        "  --mountpoint <dir>     where to expose the working tree\n"
+        "\n"
+        "Optional:\n"
+        "  --store <dir>          CAS object store (default: <source>/.agentvfs-store)\n"
+        "  --control-sock <path>  UNIX socket for agentvfs-ctl (default: /tmp/agentvfs-<pid>.sock)\n"
+        "  -f                     run in the foreground (do not daemonize)\n"
+        "  -s                     single-threaded FUSE loop\n"
+        "  --version              print version and exit\n"
+        "  --help, -h             print this help and exit\n"
+        "\n"
         "Telemetry:\n"
         "  --telemetry=backend1,backend2,...\n"
         "      Backends: ");
     bool first = true;
 #ifdef AGENTVFS_EBPF
-    print_backend_name("ebpf", first);
+    print_backend_name(stream, "ebpf", first);
 #endif
 #ifdef AGENTVFS_FANOTIFY
-    print_backend_name("fanotify", first);
+    print_backend_name(stream, "fanotify", first);
 #endif
 #ifdef AGENTVFS_PTRACE
-    print_backend_name("ptrace", first);
+    print_backend_name(stream, "ptrace", first);
 #endif
 #ifdef AGENTVFS_LDPRELOAD
-    print_backend_name("ldpreload", first);
+    print_backend_name(stream, "ldpreload", first);
 #endif
 #ifdef AGENTVFS_BPFTIME
-    print_backend_name("bpftime", first);
+    print_backend_name(stream, "bpftime", first);
 #endif
 #ifdef AGENTVFS_WASM
-    print_backend_name("wasm", first);
+    print_backend_name(stream, "wasm", first);
 #endif
 #ifdef AGENTVFS_LUA
-    print_backend_name("lua", first);
+    print_backend_name(stream, "lua", first);
 #endif
     if (first) {
-        std::fprintf(stderr, "(none)");
+        std::fprintf(stream, "(none — rebuild with -DAGENTVFS_EBPF=ON to add)");
     }
-    std::fprintf(stderr, "\n");
+    std::fprintf(stream, "\n");
 #ifdef AGENTVFS_LUA
-    std::fprintf(stderr, "  --telemetry-lua-script=PATH\n");
+    std::fprintf(stream, "  --telemetry-lua-script=PATH\n");
 #endif
 #ifdef AGENTVFS_WASM
-    std::fprintf(stderr, "  --telemetry-wasm-module=PATH\n");
+    std::fprintf(stream, "  --telemetry-wasm-module=PATH\n");
 #endif
 #ifdef AGENTVFS_PTRACE
-    std::fprintf(stderr, "  --telemetry-ptrace-pids=PID1,PID2,...\n");
+    std::fprintf(stream, "  --telemetry-ptrace-pids=PID1,PID2,...\n");
 #endif
 #ifdef AGENTVFS_LDPRELOAD
-    std::fprintf(stderr, "  --telemetry-ldpreload-socket=PATH\n");
+    std::fprintf(stream, "  --telemetry-ldpreload-socket=PATH\n");
 #endif
 #ifdef AGENTVFS_BPFTIME
-    std::fprintf(stderr, "  --telemetry-bpftime-probes=PATH\n");
+    std::fprintf(stream, "  --telemetry-bpftime-probes=PATH\n");
 #endif
+    std::fprintf(stream,
+        "\n"
+        "Exit codes:\n"
+        "  0  success, or --help / --version\n"
+        "  1  argument error or missing required flag\n"
+        "  2  daemon failed to initialize the store\n"
+        "  3  control socket failed to start\n");
 }
 
 static bool parse_args(int argc, char** argv, CasArgs& out) {
     for (int i = 1; i < argc; i++) {
         std::string a = argv[i];
         auto need = [&](int more) -> bool {
-            if (i + more >= argc) { usage(); return false; }
+            if (i + more >= argc) { usage(stderr); return false; }
             return true;
         };
-        if (a == "--source" && need(1))            out.source = argv[++i];
+        if (a == "--version") {
+            std::fprintf(stdout, "agentvfs %s\n", AGENTVFS_VERSION_STRING);
+            std::exit(0);
+        }
+        else if (a == "--source" && need(1))       out.source = argv[++i];
         else if (a == "--mountpoint" && need(1))   out.mountpoint = argv[++i];
         else if (a == "--store" && need(1))        out.store = argv[++i];
         else if (a == "--control-sock" && need(1)) out.control_sock = argv[++i];
@@ -177,10 +208,10 @@ static bool parse_args(int argc, char** argv, CasArgs& out) {
             out.telemetry_bpftime_probes = a.substr(std::strlen("--telemetry-bpftime-probes="));
         else if (a == "-f") out.foreground = true;
         else if (a == "-s") out.single_threaded = true;
-        else if (a == "-h" || a == "--help") { usage(); return false; }
+        else if (a == "-h" || a == "--help") { usage(stdout); std::exit(0); }
         else out.fuse_passthrough.push_back(a);
     }
-    if (out.source.empty() || out.mountpoint.empty()) { usage(); return false; }
+    if (out.source.empty() || out.mountpoint.empty()) { usage(stderr); return false; }
     if (out.store.empty()) out.store = out.source + "/.agentvfs-store";
     if (out.control_sock.empty()) {
         char buf[64];

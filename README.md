@@ -103,7 +103,9 @@ cmake --build build -j
 ```
 
 ```powershell
-# Windows — requires WinFsp 2.0+ from https://winfsp.dev
+# Windows — requires WinFsp 2.0+ from https://winfsp.dev,
+# and MSVC v141 (Visual Studio 2017 15.3) or newer for /arch:AVX512
+# codegen on the BLAKE3 SIMD path (current VS releases all qualify).
 cmake -B build -DAGENTVFS_EBPF=OFF -DAGENTVFS_WINFSP=ON
 cmake --build build --config Release -j
 .\build\Release\agentvfs.exe --source C:\some\dir --mountpoint Z:

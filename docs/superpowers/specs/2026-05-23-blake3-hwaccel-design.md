@@ -178,19 +178,18 @@ If any of these CI jobs fails to build or any existing `cas_test_*` test fails o
 
 ### One new unit test: `cas_test_blake3_simd`
 
-`tests/cas/cas_test_blake3_simd.cpp` does two things:
+`tests/cas/test_blake3_simd.cpp` (source file, following the existing `test_working_tree.cpp` / `test_object_store.cpp` naming convention; the target name is `cas_test_blake3_simd`) does two things:
 
-1. **Known-answer vector.** Hash a fixed 1 MiB pattern (e.g., 1 MiB of `0xab` bytes) and assert the 32-byte digest equals a hardcoded expected value, which is reproducible with `b3sum` on any reference machine. This catches the worst regression — a SIMD path returning the wrong answer — and it works on every CI platform without conditional compilation.
+1. **Known-answer vector.** Hash the empty input via `blake3_hasher_init` + `blake3_hasher_finalize` and assert the 32-byte digest equals the BLAKE3 canonical empty-input vector `af1349b9f5f9a1a6a0404dea36dcc9499bcb25c9adc112b7cc9a93cae41f3262`. This vector is published in the BLAKE3 specification and is reproducible with `b3sum`. Runs on every CI platform without conditional compilation; serves as basic API-correctness coverage.
 
-2. **Dispatch verification (POSIX only).** On platforms with `dlsym` (Linux, macOS), use `dlsym(RTLD_DEFAULT, ...)` to assert the expected SIMD entry point was linked when `AGENTVFS_BLAKE3_SIMD` is on:
-   - On `__x86_64__`: assert `blake3_hash_many_avx2` is non-null.
-   - On `__aarch64__`: assert `blake3_hash_many_neon` is non-null.
-   - On any other arch: no assertion (we fall back to portable on unknown arches by design).
-   - On Windows (`_MSC_VER` or `_WIN32`): skip the dispatch check entirely — `dlsym` is unavailable and `GetProcAddress` against the `cas_core` static library doesn't apply. The known-answer vector in step 1 still runs on Windows and is sufficient correctness coverage there.
+2. **SIMD entry-point presence (build-time check).** Declare the per-arch SIMD entry point in the test source via `extern "C"` and take its address into a `static void* const` at static-init time. If the SIMD `.c` files aren't compiled into `cas_core`, the symbol is unresolved and the test target fails to link, which is the regression signal we want — visible at build time, not runtime. Then assert at runtime that the pointer is non-null as a belt-and-suspenders check:
+   - On `__x86_64__` / `_M_X64`: take address of `blake3_hash_many_avx2`.
+   - On `__aarch64__` / `_M_ARM64`: take address of `blake3_hash_many_neon`.
+   - On other arches: no SIMD symbol referenced; the runtime check prints a `[skip]` notice and exits 0.
 
-   This is the only safeguard against a future CMake refactor silently dropping the SIMD `target_sources` entries and quietly falling back to portable on Linux/macOS.
+   This is the only safeguard against a future CMake refactor silently dropping the SIMD `target_sources` entries and quietly falling back to portable.
 
-Wire the new test into `CMakeLists.txt` alongside the other `cas_test_*` executables (model after `cas_test_object_store`, which is the existing test that exercises hashing end-to-end), and add it to the test invocations in `.github/workflows/ci.yml` for the `linux`, `macos`, and `windows` jobs.
+The test target is gated on `AGENTVFS_BLAKE3_SIMD=ON` in `CMakeLists.txt` so that the rollback build (`-DAGENTVFS_BLAKE3_SIMD=OFF`) doesn't try to link against symbols that aren't there. Wire the new test alongside the other `cas_test_*` executables and add it to the test invocations in `.github/workflows/ci.yml` for the `linux`, `macos`, and `windows` jobs. The `windows-daemon` job is intentionally not modified — same MSVC toolchain as `windows`, so SIMD coverage is redundant.
 
 ### No new shell integration test
 
@@ -212,7 +211,7 @@ agentvfs-public/
   include/blake3/blake3_avx2.c          new (copied from agentvfs/)
   include/blake3/blake3_avx512.c        new (copied from agentvfs/)
   include/blake3/blake3_neon.c          new (copied from agentvfs/)
-  tests/cas/cas_test_blake3_simd.cpp    new
+  tests/cas/test_blake3_simd.cpp        new
   .github/workflows/ci.yml              modify (add cas_test_blake3_simd to each job's test list)
   README.md                             modify (one-line MSVC version note in the Windows build section)
   CLAUDE.md                             modify (replace the "blake3 is vendored with all SIMD paths disabled..." paragraph with the new state — runtime-dispatched SIMD, AGENTVFS_BLAKE3_SIMD=OFF as the escape hatch)

@@ -511,17 +511,24 @@ Same edit pattern, inside the `macos:` job's `Unit tests` step:
 
 - [ ] **Step 3: Add the test to the Windows job**
 
-The Windows job's `Unit tests` step has a different shape — it currently only builds (no test runs), or runs a narrower set. Read the existing step carefully and add `./build/Release/cas_test_blake3_simd.exe` to whatever list of tests is being invoked. If no tests are currently invoked on Windows (the comment in the file says "Windows builds only the portable tests gated by if(UNIX)/if(LINUX)"), then `cas_test_blake3_simd` is portable (no `if(UNIX)` gate on its target) and SHOULD be invoked on Windows. Add a single line:
+The `windows:` job's `Unit tests` step (around lines 80-86 of `ci.yml`) runs a narrower set of `cas_test_*` programs using PowerShell-style paths (the GitHub Actions Windows runner defaults to PowerShell for `run: |` blocks). Append `cas_test_blake3_simd` using the same `.\build\Release\xxx.exe` backslash style as the existing entries:
 
 ```yaml
       - name: Unit tests
         run: |
-          ./build/Release/cas_test_blake3_simd.exe
+          .\build\Release\cas_test_working_tree.exe
+          .\build\Release\cas_test_write_buffer.exe
+          .\build\Release\cas_test_branch_context.exe
+          .\build\Release\cas_test_branch_merge.exe
+          .\build\Release\cas_test_blake3_simd.exe
+          .\build\Release\cas_test_telemetry_event.exe
 ```
 
-If the Windows job already has a `Unit tests` step with other runs, append to it instead of creating a new step. Use PowerShell-compatible path separators only if the existing step does so (the GitHub Actions runner uses Git Bash by default for `run: |` blocks, which accepts forward slashes — match what's already there).
+- [ ] **Step 4: Do NOT modify the `windows-daemon` job**
 
-- [ ] **Step 4: Validate the workflow YAML locally**
+The `windows-daemon:` job (around line 88+ of `ci.yml`) uses the same MSVC toolchain as `windows:` — adding `cas_test_blake3_simd` there would be redundant SIMD coverage and tangles a SIMD test with the WinFsp daemon's runtime requirements. Skip it intentionally.
+
+- [ ] **Step 5: Validate the workflow YAML locally**
 
 If `yamllint` is available:
 ```bash
@@ -529,7 +536,7 @@ yamllint .github/workflows/ci.yml
 ```
 Expected: no errors. If `yamllint` is unavailable, skip — GitHub's parser will catch syntax errors on push.
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 6: Commit**
 
 ```bash
 git add .github/workflows/ci.yml
@@ -546,11 +553,23 @@ git commit -m "ci: run cas_test_blake3_simd on linux / macos / windows"
 
 - [ ] **Step 1: Add MSVC version note to `README.md`**
 
-Find the Windows build prerequisites block in `README.md` (search for `WinFsp` or `Windows`). Add a one-line note about the MSVC requirement. The note should be terse:
+The MSVC note belongs in the **Build from source** section's Windows entry, NOT in the Quick-start section. Find the line that currently reads:
 
-> Requires MSVC v141 (Visual Studio 2017 15.3) or newer for the `/arch:AVX512` codegen on the BLAKE3 SIMD path; current Visual Studio releases all qualify.
+```
+# Windows — requires WinFsp 2.0+ from https://winfsp.dev
+cmake -B build -DAGENTVFS_EBPF=OFF -DAGENTVFS_WINFSP=ON
+```
 
-Place this as a bullet or single sentence in the existing Windows prerequisites section. Do NOT create a new section — match the existing prose style and brevity.
+(it's around line 106 of `README.md`). Extend the comment to one additional clause noting the MSVC version requirement. Result should look like:
+
+```
+# Windows — requires WinFsp 2.0+ from https://winfsp.dev,
+# and MSVC v141 (Visual Studio 2017 15.3) or newer for /arch:AVX512
+# codegen on the BLAKE3 SIMD path (current VS releases all qualify).
+cmake -B build -DAGENTVFS_EBPF=OFF -DAGENTVFS_WINFSP=ON
+```
+
+Do NOT create a new section. Do NOT modify the Quick-start Windows block (line ~26) — that block is for users running the prebuilt installer where the MSVC requirement doesn't apply.
 
 - [ ] **Step 2: Update `CLAUDE.md`**
 

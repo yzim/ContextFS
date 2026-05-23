@@ -169,7 +169,9 @@ if(AGENTVFS_BLAKE3_SIMD)
             include/blake3/blake3_avx512.c)
         if(MSVC)
             # MSVC has no dedicated /arch:SSE4.1 — /arch:AVX is the
-            # narrowest flag that turns on SSE4.1 codegen.
+            # narrowest flag that turns on SSE4.1 codegen. /arch:SSE2 is
+            # x86-only; on x64 SSE2 is the implicit baseline and MSVC
+            # silently ignores the flag, which is harmless.
             set_source_files_properties(include/blake3/blake3_sse2.c
                 PROPERTIES COMPILE_OPTIONS "/arch:SSE2")
             set_source_files_properties(include/blake3/blake3_sse41.c

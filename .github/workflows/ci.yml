@@ -30,6 +30,7 @@ jobs:
           ./build/cas_test_fh_lifecycle /tmp /tmp/test.sock || true
           ./build/cas_test_branch_merge_daemon || true
           ./build/cas_test_branch_persistence || true
+          ./build/cas_test_blake3_simd
           ./build/cas_test_telemetry_event
           ./build/cas_test_telemetry_registry
 
@@ -56,6 +57,7 @@ jobs:
           ./build/cas_test_branch_context
           ./build/cas_test_branch_merge
           ./build/cas_test_branch_merge_commit
+          ./build/cas_test_blake3_simd
           ./build/cas_test_telemetry_event
           ./build/cas_test_telemetry_registry
 
@@ -83,6 +85,7 @@ jobs:
           .\build\Release\cas_test_write_buffer.exe
           .\build\Release\cas_test_branch_context.exe
           .\build\Release\cas_test_branch_merge.exe
+          .\build\Release\cas_test_blake3_simd.exe
           .\build\Release\cas_test_telemetry_event.exe
 
   windows-daemon:

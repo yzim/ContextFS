@@ -148,17 +148,65 @@ set(CAS_CORE_PORTABLE_SOURCES
 set(CAS_CORE_POSIX_SOURCES
     src/cas/control_socket.cpp
 )
+
+option(AGENTVFS_BLAKE3_SIMD "Enable runtime-dispatched BLAKE3 SIMD paths" ON)
+
 add_library(cas_core STATIC ${CAS_CORE_PORTABLE_SOURCES})
 if(UNIX)
     target_sources(cas_core PRIVATE ${CAS_CORE_POSIX_SOURCES})
 endif()
 target_include_directories(cas_core PUBLIC src/cas include include/blake3)
-target_compile_definitions(cas_core PRIVATE
-    BLAKE3_NO_AVX512 BLAKE3_NO_AVX2 BLAKE3_NO_SSE41 BLAKE3_NO_SSE2
-    # On aarch64 the vendored blake3 auto-enables NEON, but we only
-    # compile blake3_portable.c — link would fail with an unresolved
-    # blake3_hash_many_neon. Force the portable path on every arch.
-    BLAKE3_USE_NEON=0)
+
+if(AGENTVFS_BLAKE3_SIMD)
+    set(_blake3_amd64_names amd64 AMD64 x86_64)
+    set(_blake3_arm64_names aarch64 AArch64 arm64 ARM64 armv8 armv8a)
+
+    if(CMAKE_SYSTEM_PROCESSOR IN_LIST _blake3_amd64_names)
+        target_sources(cas_core PRIVATE
+            include/blake3/blake3_sse2.c
+            include/blake3/blake3_sse41.c
+            include/blake3/blake3_avx2.c
+            include/blake3/blake3_avx512.c)
+        if(MSVC)
+            # MSVC has no dedicated /arch:SSE4.1 — /arch:AVX is the
+            # narrowest flag that turns on SSE4.1 codegen. /arch:SSE2 is
+            # x86-only; on x64 SSE2 is the implicit baseline and MSVC
+            # silently ignores the flag, which is harmless.
+            set_source_files_properties(include/blake3/blake3_sse2.c
+                PROPERTIES COMPILE_OPTIONS "/arch:SSE2")
+            set_source_files_properties(include/blake3/blake3_sse41.c
+                PROPERTIES COMPILE_OPTIONS "/arch:AVX")
+            set_source_files_properties(include/blake3/blake3_avx2.c
+                PROPERTIES COMPILE_OPTIONS "/arch:AVX2")
+            set_source_files_properties(include/blake3/blake3_avx512.c
+                PROPERTIES COMPILE_OPTIONS "/arch:AVX512")
+        else()
+            set_source_files_properties(include/blake3/blake3_sse2.c
+                PROPERTIES COMPILE_OPTIONS "-msse2")
+            set_source_files_properties(include/blake3/blake3_sse41.c
+                PROPERTIES COMPILE_OPTIONS "-msse4.1")
+            set_source_files_properties(include/blake3/blake3_avx2.c
+                PROPERTIES COMPILE_OPTIONS "-mavx2")
+            set_source_files_properties(include/blake3/blake3_avx512.c
+                PROPERTIES COMPILE_OPTIONS "-mavx512f;-mavx512vl")
+        endif()
+    elseif(CMAKE_SYSTEM_PROCESSOR IN_LIST _blake3_arm64_names)
+        target_sources(cas_core PRIVATE include/blake3/blake3_neon.c)
+        # 64-bit aarch64 has NEON unconditionally; no -mfpu flag needed.
+        # blake3_dispatch.c picks NEON automatically when BLAKE3_USE_NEON
+        # is unset (the upstream default).
+    else()
+        # Unknown arch — fall back to portable, same as
+        # AGENTVFS_BLAKE3_SIMD=OFF.
+        target_compile_definitions(cas_core PRIVATE
+            BLAKE3_NO_AVX512 BLAKE3_NO_AVX2 BLAKE3_NO_SSE41 BLAKE3_NO_SSE2
+            BLAKE3_USE_NEON=0)
+    endif()
+else()
+    target_compile_definitions(cas_core PRIVATE
+        BLAKE3_NO_AVX512 BLAKE3_NO_AVX2 BLAKE3_NO_SSE41 BLAKE3_NO_SSE2
+        BLAKE3_USE_NEON=0)
+endif()
 if(NOT MSVC)
     target_compile_options(cas_core PRIVATE -Wall -Wextra -Wpedantic)
 endif()
@@ -521,6 +569,11 @@ if(UNIX)
 add_executable(cas_test_telemetry_registry tests/cas/test_telemetry_registry.cpp src/cas/telemetry_registry.cpp src/cas/telemetry_event.cpp)
 target_include_directories(cas_test_telemetry_registry PRIVATE include src src/cas)
 target_compile_features(cas_test_telemetry_registry PRIVATE cxx_std_17)
+endif()
+
+if(AGENTVFS_BLAKE3_SIMD)
+add_executable(cas_test_blake3_simd tests/cas/test_blake3_simd.cpp)
+target_link_libraries(cas_test_blake3_simd PRIVATE cas_core)
 endif()
 
 if(LINUX)

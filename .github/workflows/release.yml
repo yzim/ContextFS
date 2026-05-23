@@ -27,8 +27,9 @@ jobs:
           cp build/agentvfs build/agentvfs-ctl LICENSE "$stage/"
           cp start.sh "$stage/agentvfs-quickstart"
           chmod +x "$stage/agentvfs-quickstart"
+          cp docs/skills/agentvfs-workspace.md "$stage/agentvfs-workspace.md"
           tar -C "$stage" -czf "agentvfs-${version}-linux-x86_64.tar.gz" \
-              agentvfs agentvfs-ctl agentvfs-quickstart LICENSE
+              agentvfs agentvfs-ctl agentvfs-quickstart agentvfs-workspace.md LICENSE
       - uses: actions/upload-artifact@v4
         with:
           name: linux-x86_64
@@ -52,8 +53,9 @@ jobs:
           cp build/agentvfs build/agentvfs-ctl LICENSE "$stage/"
           cp start.sh "$stage/agentvfs-quickstart"
           chmod +x "$stage/agentvfs-quickstart"
+          cp docs/skills/agentvfs-workspace.md "$stage/agentvfs-workspace.md"
           tar -C "$stage" -czf "agentvfs-${version}-darwin-arm64.tar.gz" \
-              agentvfs agentvfs-ctl agentvfs-quickstart LICENSE
+              agentvfs agentvfs-ctl agentvfs-quickstart agentvfs-workspace.md LICENSE
       - uses: actions/upload-artifact@v4
         with:
           name: darwin-arm64
@@ -77,8 +79,9 @@ jobs:
           cp build/agentvfs build/agentvfs-ctl LICENSE "$stage/"
           cp start.sh "$stage/agentvfs-quickstart"
           chmod +x "$stage/agentvfs-quickstart"
+          cp docs/skills/agentvfs-workspace.md "$stage/agentvfs-workspace.md"
           tar -C "$stage" -czf "agentvfs-${version}-darwin-x86_64.tar.gz" \
-              agentvfs agentvfs-ctl agentvfs-quickstart LICENSE
+              agentvfs agentvfs-ctl agentvfs-quickstart agentvfs-workspace.md LICENSE
       - uses: actions/upload-artifact@v4
         with:
           name: darwin-x86_64

@@ -107,8 +107,20 @@ mkdir -p "$PREFIX"
 for f in agentvfs agentvfs-ctl agentvfs-quickstart; do
     [ -f "$WORK/$f" ] && install -m 0755 "$WORK/$f" "$PREFIX/$f"
 done
+# agentvfs-quickstart reads this file at runtime to write
+# ~/.claude/skills/agentvfs-workspace/SKILL.md and ~/.codex/AGENTS.md.
+[ -f "$WORK/agentvfs-workspace.md" ] && \
+    install -m 0644 "$WORK/agentvfs-workspace.md" "$PREFIX/agentvfs-workspace.md"
 
 # Final message.
+# Suggest the rc file for the most common login shell on this OS so the
+# user knows where to persist the PATH addition.
+if [ "$os" = darwin ]; then
+    default_rc="~/.zshrc"; alt_rc="~/.bashrc"
+else
+    default_rc="~/.bashrc"; alt_rc="~/.zshrc"
+fi
+
 echo
 echo "Installed agentvfs $VERSION to $PREFIX"
 echo
@@ -117,10 +129,15 @@ case ":$PATH:" in
         echo "next: agentvfs-quickstart /path/to/project"
         ;;
     *)
-        echo "Note: $PREFIX is not in your PATH. Add it:"
-        echo "  export PATH=\"$PREFIX:\$PATH\""
-        echo "  echo 'export PATH=\"$PREFIX:\$PATH\"' >> ~/.bashrc   # or ~/.zshrc"
+        echo "Note: $PREFIX is not in your PATH."
         echo
-        echo "Then: agentvfs-quickstart /path/to/project"
+        echo "  # 1) Activate in the current shell (run this NOW):"
+        echo "  export PATH=\"$PREFIX:\$PATH\""
+        echo
+        echo "  # 2) Persist for future shells (run this ONCE):"
+        echo "  echo 'export PATH=\"$PREFIX:\$PATH\"' >> $default_rc"
+        echo "  # (use $alt_rc if that's your login shell)"
+        echo
+        echo "Then run: agentvfs-quickstart /path/to/project"
         ;;
 esac

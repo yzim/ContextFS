@@ -85,10 +85,27 @@ if ! command -v agentvfs >/dev/null 2>&1; then
 fi
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-SKILL_SRC="$SCRIPT_DIR/docs/skills/agentvfs-workspace.md"
+# In a repo checkout the skill source lives under docs/skills/. In a
+# packaged install (release.yml + install.sh) it's bundled flat next to
+# the renamed agentvfs-quickstart script.
+SKILL_SRC=""
+for candidate in \
+    "$SCRIPT_DIR/docs/skills/agentvfs-workspace.md" \
+    "$SCRIPT_DIR/agentvfs-workspace.md"; do
+    if [[ -f "$candidate" ]]; then
+        SKILL_SRC="$candidate"
+        break
+    fi
+done
 
-if [[ ! -f "$SKILL_SRC" ]]; then
-    echo "start.sh: skill source not found at $SKILL_SRC — run start.sh from the agentvfs repo checkout" >&2
+if [[ -z "$SKILL_SRC" ]]; then
+    echo "start.sh: skill source not found." >&2
+    echo "  searched: $SCRIPT_DIR/docs/skills/agentvfs-workspace.md" >&2
+    echo "            $SCRIPT_DIR/agentvfs-workspace.md" >&2
+    echo "  If you installed via install.sh, this is a packaging bug — please" >&2
+    echo "  report at https://github.com/thustorage/ContextFS/issues." >&2
+    echo "  If you're running from a repo checkout, make sure" >&2
+    echo "  docs/skills/agentvfs-workspace.md exists." >&2
     exit 1
 fi
 

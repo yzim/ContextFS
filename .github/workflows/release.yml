@@ -1,0 +1,134 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  build-linux-x86_64:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install deps
+        run: sudo apt-get update && sudo apt-get install -y libfuse3-dev fuse3
+      - name: Build
+        run: |
+          cmake -B build -DAGENTVFS_EBPF=OFF -DCMAKE_BUILD_TYPE=Release
+          cmake --build build -j
+      - name: Package
+        run: |
+          version="${GITHUB_REF_NAME}"
+          stage="$(mktemp -d)"
+          cp build/agentvfs build/agentvfs-ctl LICENSE "$stage/"
+          cp start.sh "$stage/agentvfs-quickstart"
+          chmod +x "$stage/agentvfs-quickstart"
+          tar -C "$stage" -czf "agentvfs-${version}-linux-x86_64.tar.gz" \
+              agentvfs agentvfs-ctl agentvfs-quickstart LICENSE
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-x86_64
+          path: agentvfs-*-linux-x86_64.tar.gz
+
+  build-darwin-arm64:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: brew install --cask macos-fuse-t/cask/fuse-t
+      - name: Build
+        run: |
+          cmake -B build -DAGENTVFS_EBPF=OFF -DAGENTVFS_FUSE_T=ON -DCMAKE_BUILD_TYPE=Release
+          cmake --build build -j
+      - name: Package
+        run: |
+          version="${GITHUB_REF_NAME}"
+          stage="$(mktemp -d)"
+          cp build/agentvfs build/agentvfs-ctl LICENSE "$stage/"
+          cp start.sh "$stage/agentvfs-quickstart"
+          chmod +x "$stage/agentvfs-quickstart"
+          tar -C "$stage" -czf "agentvfs-${version}-darwin-arm64.tar.gz" \
+              agentvfs agentvfs-ctl agentvfs-quickstart LICENSE
+      - uses: actions/upload-artifact@v4
+        with:
+          name: darwin-arm64
+          path: agentvfs-*-darwin-arm64.tar.gz
+
+  build-darwin-x86_64:
+    runs-on: macos-15-intel
+    steps:
+      - uses: actions/checkout@v4
+      - run: brew install --cask macos-fuse-t/cask/fuse-t
+      - name: Build
+        run: |
+          cmake -B build -DAGENTVFS_EBPF=OFF -DAGENTVFS_FUSE_T=ON -DCMAKE_BUILD_TYPE=Release
+          cmake --build build -j
+      - name: Package
+        run: |
+          version="${GITHUB_REF_NAME}"
+          stage="$(mktemp -d)"
+          cp build/agentvfs build/agentvfs-ctl LICENSE "$stage/"
+          cp start.sh "$stage/agentvfs-quickstart"
+          chmod +x "$stage/agentvfs-quickstart"
+          tar -C "$stage" -czf "agentvfs-${version}-darwin-x86_64.tar.gz" \
+              agentvfs agentvfs-ctl agentvfs-quickstart LICENSE
+      - uses: actions/upload-artifact@v4
+        with:
+          name: darwin-x86_64
+          path: agentvfs-*-darwin-x86_64.tar.gz
+
+  build-windows-x86_64:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: choco install winfsp -y --no-progress
+        shell: powershell
+      - name: Build
+        run: |
+          cmake -B build -DAGENTVFS_EBPF=OFF -DAGENTVFS_WINFSP=ON -DCMAKE_BUILD_TYPE=Release
+          cmake --build build --config Release -j
+      - name: Package
+        shell: powershell
+        run: |
+          $version = "$env:GITHUB_REF_NAME"
+          $stage = (New-Item -ItemType Directory -Path (Join-Path $env:TEMP "stage-$(Get-Random)") -Force).FullName
+          Copy-Item build\Release\agentvfs.exe     $stage
+          Copy-Item build\Release\agentvfs-ctl.exe $stage
+          Copy-Item LICENSE                        $stage
+          Push-Location $stage
+          Compress-Archive -Path * -DestinationPath (Join-Path $env:GITHUB_WORKSPACE "agentvfs-$version-windows-x86_64.zip")
+          Pop-Location
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-x86_64
+          path: agentvfs-*-windows-x86_64.zip
+
+  publish:
+    needs: [build-linux-x86_64, build-darwin-arm64, build-darwin-x86_64, build-windows-x86_64]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with: { merge-multiple: true }
+      - name: Generate checksums
+        run: |
+          version="${GITHUB_REF_NAME}"
+          sha256sum agentvfs-${version}-linux-x86_64.tar.gz \
+                    agentvfs-${version}-darwin-arm64.tar.gz \
+                    agentvfs-${version}-darwin-x86_64.tar.gz \
+                    agentvfs-${version}-windows-x86_64.zip \
+              > "agentvfs-${version}-checksums.txt"
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          version="${GITHUB_REF_NAME}"
+          gh release create "$version" \
+              --title "$version" \
+              --generate-notes \
+              "agentvfs-${version}-linux-x86_64.tar.gz" \
+              "agentvfs-${version}-darwin-arm64.tar.gz" \
+              "agentvfs-${version}-darwin-x86_64.tar.gz" \
+              "agentvfs-${version}-windows-x86_64.zip" \
+              "agentvfs-${version}-checksums.txt"

@@ -35,3 +35,4 @@ baselines/
 
 # Project-instructions for Claude Code sessions; per-developer
 CLAUDE.md
+.claude/

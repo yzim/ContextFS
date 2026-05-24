@@ -64,6 +64,8 @@ static int cas_getattr(const char* path, struct stat* st) {
     if (std::strcmp(path, "/") == 0) {
         st->st_mode = S_IFDIR | 0755;
         st->st_nlink = 2;
+        st->st_uid = fuse_get_context()->uid;
+        st->st_gid = fuse_get_context()->gid;
         return 0;
     }
 
@@ -77,6 +79,8 @@ static int cas_getattr(const char* path, struct stat* st) {
         case EntryKind::Tree:
             st->st_mode = S_IFDIR | (entry->mode & 07777);
             st->st_nlink = 2;
+            st->st_uid = fuse_get_context()->uid;
+            st->st_gid = fuse_get_context()->gid;
             return 0;
         case EntryKind::Symlink:
             st->st_mode = S_IFLNK | 0777; break;

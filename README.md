@@ -95,7 +95,7 @@ sudo cmake --install build
 
 ```bash
 # Linux (openEuler)
-dnf install -y cmake clang fuse3-devel bpftool libbpf-devel
+sudo dnf install -y cmake clang fuse3-devel bpftool libbpf-devel
 cmake -B build && cmake --build build -j
 sudo cmake --install build
 ./start.sh /path/to/project

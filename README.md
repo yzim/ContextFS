@@ -94,6 +94,15 @@ sudo cmake --install build
 ```
 
 ```bash
+# Linux (openEuler)
+dnf install -y cmake clang fuse3-devel bpftool libbpf-devel
+cmake -B build && cmake --build build -j
+sudo cmake --install build
+./start.sh /path/to/project
+# eBPF telemetry is on by default; -DAGENTVFS_EBPF=OFF to skip.
+```
+
+```bash
 # macOS
 brew install --cask macos-fuse-t/cask/fuse-t
 cmake -B build -DAGENTVFS_EBPF=OFF -DAGENTVFS_FUSE_T=ON

@@ -121,6 +121,39 @@ cmake --build build --config Release -j
 .\build\Release\agentvfs-ctl.exe --sock \\.\pipe\agentvfs-<hash> checkpoint baseline
 ```
 
+### Self-hosting: build inside a ContextFS mount
+
+ContextFS can build and install itself from within its own FUSE mount,
+giving every checkout a self-contained build environment with checkpoint
+and rollback for development experimentation.
+
+Pass `--allow-root` to `agentvfs workspace start` (or `agentvfs workspace init`)
+when root needs to access the FUSE mount — required for
+`sudo cmake --install build` to write to system paths from inside the mount
+(needs `user_allow_other` in `/etc/fuse.conf`, already set by the prebuilt
+installer). The setting is persisted in `workspace.json` for subsequent starts.
+
+```bash
+# 1. Build and install agentvfs normally first
+cd path/to/ContextFS
+cmake -B build -DAGENTVFS_EBPF=OFF && cmake --build build -j
+sudo cmake --install build
+
+# 2. Start a workspace with allow_root on the source tree itself
+agentvfs workspace init selfhost --from $(pwd) --allow-root
+agentvfs workspace start selfhost --allow-root
+# or via start.sh (pass --allow-root after workspace args):
+#   ./start.sh path/to/ContextFS
+#   agentvfs workspace start selfhost --allow-root
+
+# 3. Rebuild and install from inside the mount
+cd /run/user/$(id -u)/agentvfs/selfhost/mount
+rm -rf build   # fresh build dir inside the FUSE mount
+cmake -B build -DAGENTVFS_EBPF=OFF
+cmake --build build -j
+sudo cmake --install build    # allow_root enables sudo access
+```
+
 ## License
 
 Licensed under the Apache License, Version 2.0. See [LICENSE](LICENSE).

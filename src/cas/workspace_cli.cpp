@@ -192,6 +192,24 @@ static bool json_get_long(const std::string& json,
     return true;
 }
 
+static bool json_get_bool(const std::string& json,
+                          const std::string& key,
+                          bool& value) {
+    size_t p = 0;
+    if (!json_find_key(json, key, p)) return false;
+    while (p < json.size() && (json[p] == ' ' || json[p] == '\t')) p++;
+    std::string rest = json.substr(p);
+    if (rest.substr(0, 4) == "true") {
+        value = true;
+        return true;
+    }
+    if (rest.substr(0, 5) == "false") {
+        value = false;
+        return true;
+    }
+    return false;
+}
+
 std::string session_to_json(const SessionState& state) {
     std::ostringstream out;
     out << "{\n"
@@ -273,7 +291,8 @@ bool write_session_file(const std::string& path,
 std::string workspace_config_to_json(const WorkspaceConfig& config) {
     std::ostringstream out;
     out << "{\n"
-        << "  \"mount_override\":\"" << json_escape(config.mount_override) << "\"\n"
+        << "  \"mount_override\":\"" << json_escape(config.mount_override) << "\",\n"
+        << "  \"allow_root\":" << (config.allow_root ? "true" : "false") << "\n"
         << "}\n";
     return out.str();
 }
@@ -300,12 +319,18 @@ bool parse_workspace_config_json(const std::string& json,
     }
 
     WorkspaceConfig parsed;
-    // mount_override is optional. Missing key is valid (forward-compat).
-    // Key present but value unparseable is an error.
+    // mount_override and allow_root are optional. Missing keys are valid
+    // (forward-compat). Keys present but unparseable is an error.
     size_t after_colon = 0;
     if (json_find_key(json, "mount_override", after_colon)) {
         if (!json_get_string(json, "mount_override", parsed.mount_override)) {
             error = "workspace.json: malformed mount_override value";
+            return false;
+        }
+    }
+    if (json_find_key(json, "allow_root", after_colon)) {
+        if (!json_get_bool(json, "allow_root", parsed.allow_root)) {
+            error = "workspace.json: malformed allow_root value";
             return false;
         }
     }
@@ -469,7 +494,7 @@ bool socket_responds(const std::string& socket_path) {
 
 static int workspace_usage() {
     std::cerr
-        << "Usage: agentvfs workspace start [name] [--root <dir>] [--mount <dir>] [--telemetry auto|none|<csv>]\n"
+        << "Usage: agentvfs workspace start [name] [--root <dir>] [--mount <dir>] [--telemetry auto|none|<csv>] [--allow-root]\n"
         << "       agentvfs workspace init <name> --from <dir> [--root <dir>] [--mount <dir>]\n"
         << "       agentvfs workspace status [name] [--root <dir>]\n"
         << "       agentvfs workspace list [--root <dir>]\n"
@@ -488,6 +513,7 @@ struct ParsedCommon {
     std::string target;
     std::string from_dir;        // for init
     std::string mount_override;  // for init/start
+    bool allow_root = false;    // for init/start
 };
 
 static bool is_dir(const std::string& path) {
@@ -715,6 +741,8 @@ static bool parse_common_args(int argc,
                 return false;
             }
             out.mount_override = argv[i];
+        } else if (arg == "--allow-root" && (cmd == "init" || cmd == "start")) {
+            out.allow_root = true;
         } else if (!arg.empty() && arg[0] == '-') {
             std::cerr << "agentvfs: unknown option for workspace " << cmd << ": " << arg << "\n";
             return false;
@@ -800,6 +828,7 @@ static bool acquire_start_lock(const WorkspacePaths& paths,
 static pid_t spawn_daemon(const std::string& self_path,
                           const WorkspacePaths& paths,
                           const std::string& telemetry,
+                          bool allow_root,
                           std::string& error) {
     pid_t pid = fork();
     if (pid < 0) {
@@ -823,6 +852,10 @@ static pid_t spawn_daemon(const std::string& self_path,
             "--telemetry=" + telemetry,
             "-f"
         };
+        if (allow_root) {
+            args.push_back("-o");
+            args.push_back("allow_root");
+        }
         std::vector<char*> cargs;
         for (auto& a : args) cargs.push_back(const_cast<char*>(a.c_str()));
         cargs.push_back(nullptr);
@@ -1061,17 +1094,22 @@ static int command_init(const ParsedCommon& opts) {
         return 1;
     }
 
-    if (!opts.mount_override.empty()) {
+    {
         WorkspaceConfig config;
-        if (!make_absolute(opts.mount_override, config.mount_override, error)) {
-            std::cerr << "agentvfs: cannot resolve --mount " << opts.mount_override
-                      << ": " << error << "\n";
-            return 1;
+        if (!opts.mount_override.empty()) {
+            if (!make_absolute(opts.mount_override, config.mount_override, error)) {
+                std::cerr << "agentvfs: cannot resolve --mount " << opts.mount_override
+                          << ": " << error << "\n";
+                return 1;
+            }
         }
-        std::string config_path = paths.root + "/workspace.json";
-        if (!write_workspace_config_file(config_path, config, error)) {
-            std::cerr << "agentvfs: " << error << "\n";
-            return 1;
+        config.allow_root = opts.allow_root;
+        if (!opts.mount_override.empty() || opts.allow_root) {
+            std::string config_path = paths.root + "/workspace.json";
+            if (!write_workspace_config_file(config_path, config, error)) {
+                std::cerr << "agentvfs: " << error << "\n";
+                return 1;
+            }
         }
     }
 
@@ -1210,11 +1248,20 @@ static int command_start(const ParsedCommon& opts, const std::string& self_path)
         return 1;
     }
     paths.mount = resolve_mount_path(cli_override, config.mount_override, default_mount);
+    if (opts.allow_root) config.allow_root = true;
 
-    // Persist a CLI override so subsequent starts inherit it.
+    // Persist CLI overrides so subsequent starts inherit them.
     if (!cli_override.empty() && cli_override != config.mount_override) {
         WorkspaceConfig new_config = config;
         new_config.mount_override = cli_override;
+        new_config.allow_root = config.allow_root || opts.allow_root;
+        if (!write_workspace_config_file(config_path, new_config, error)) {
+            std::cerr << "agentvfs: " << error << "\n";
+            return 1;
+        }
+    } else if (opts.allow_root && !config.allow_root) {
+        WorkspaceConfig new_config = config;
+        new_config.allow_root = true;
         if (!write_workspace_config_file(config_path, new_config, error)) {
             std::cerr << "agentvfs: " << error << "\n";
             return 1;
@@ -1246,7 +1293,7 @@ static int command_start(const ParsedCommon& opts, const std::string& self_path)
         telemetry = select_auto_telemetry(detect_telemetry_availability());
         telemetry_warning = telemetry == "none";
     }
-    pid_t pid = spawn_daemon(self_path, paths, telemetry, error);
+    pid_t pid = spawn_daemon(self_path, paths, telemetry, config.allow_root, error);
     if (pid <= 0) {
         std::cerr << "agentvfs: " << error << "\n";
         return 1;

@@ -294,12 +294,13 @@ static int cas_access(const char* path, int mask) {
     if (!entry) return -ENOENT;
     if (mask == F_OK) return 0;
 
-    // Spec §FUSE callbacks: MVP checks only the "other" mode bits; owner
-    // uid/gid tracking is deferred. Single-agent scope makes this safe.
+    // getattr always sets st_uid/st_gid to the caller's own, so the
+    // caller is always the "owner" of the file in this FS's semantics.
+    // Check owner permission bits (0400/0200/0100), not other bits.
     uint32_t m = entry->mode;
-    if ((mask & R_OK) && !(m & 0004)) return -EACCES;
-    if ((mask & W_OK) && !(m & 0002)) return -EACCES;
-    if ((mask & X_OK) && !(m & 0001)) return -EACCES;
+    if ((mask & R_OK) && !(m & 0400)) return -EACCES;
+    if ((mask & W_OK) && !(m & 0200)) return -EACCES;
+    if ((mask & X_OK) && !(m & 0100)) return -EACCES;
     return 0;
 }
 
@@ -396,6 +397,47 @@ static int cas_readlink(const char* path, char* buf, size_t size) {
     return 0;
 }
 
+static int cas_utimens(const char* path, const struct timespec tv[2],
+                        struct fuse_file_info* fi) {
+    (void)tv;
+    (void)fi;
+    Daemon* d = get_daemon();
+    if (Daemon::is_hidden(path)) return -ENOENT;
+    if (auto* bs = d->bootstrap()) bs->ensure_path(path);
+    auto br = resolve_branch(d);
+    auto entry = br->wt.lookup(path);
+    if (!entry) return -ENOENT;
+    return 0;
+}
+
+static int cas_chmod(const char* path, mode_t mode, struct fuse_file_info* fi) {
+    (void)fi;
+    Daemon* d = get_daemon();
+    if (Daemon::is_hidden(path)) return -ENOENT;
+    if (auto* bs = d->bootstrap()) bs->ensure_path(path);
+    auto br = resolve_branch(d);
+    std::lock_guard<std::mutex> lk(br->checkpoint_mu);
+    auto entry = br->wt.lookup(path);
+    if (!entry) return -ENOENT;
+    entry->mode = (entry->mode & S_IFMT) | (mode & 07777);
+    br->wt.insert(path, *entry);
+    return 0;
+}
+
+static int cas_chown(const char* path, uid_t uid, gid_t gid,
+                      struct fuse_file_info* fi) {
+    (void)uid;
+    (void)gid;
+    (void)fi;
+    Daemon* d = get_daemon();
+    if (Daemon::is_hidden(path)) return -ENOENT;
+    if (auto* bs = d->bootstrap()) bs->ensure_path(path);
+    auto br = resolve_branch(d);
+    auto entry = br->wt.lookup(path);
+    if (!entry) return -ENOENT;
+    return 0;
+}
+
 static void fill_fuse_ops(struct fuse_operations& ops) {
     ops.getattr   = cas_getattr;
     ops.open      = cas_open;
@@ -415,6 +457,9 @@ static void fill_fuse_ops(struct fuse_operations& ops) {
     ops.rename    = cas_rename;
     ops.symlink   = cas_symlink;
     ops.readlink  = cas_readlink;
+    ops.utimens   = cas_utimens;
+    ops.chmod     = cas_chmod;
+    ops.chown     = cas_chown;
 }
 
 int run_filesystem(Daemon& daemon, const MountOptions& opts) {

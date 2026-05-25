@@ -35,6 +35,7 @@ struct SessionState {
 // Lives at <root>/<name>/workspace.json. Optional file: missing means defaults.
 struct WorkspaceConfig {
     std::string mount_override;
+    bool allow_root = false;
 };
 
 bool is_valid_workspace_name(const std::string& name);

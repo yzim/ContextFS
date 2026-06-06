@@ -1,0 +1,20 @@
+{
+  "name": "pi-agentvfs-rewind",
+  "version": "0.1.0",
+  "description": "Checkpoint/rewind extension for the Pi coding agent backed by ContextFS agentvfs daemon",
+  "license": "Apache-2.0",
+  "author": "ContextFS",
+  "files": [
+    "src/",
+    "README.md",
+    "LICENSE"
+  ],
+  "pi": {
+    "extensions": [
+      "./src/index.ts"
+    ]
+  },
+  "devDependencies": {
+    "@earendil-works/pi-coding-agent": "*"
+  }
+}

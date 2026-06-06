@@ -66,9 +66,14 @@ CheckpointResult CheckpointManager::checkpoint_locked(
     if (!flush_fn()) return {false, ZERO_HASH, "flush failed"};
 
     std::vector<Hash> written_hashes;
-    Hash tree_hash = serialize_working_tree(wt, store_, written_hashes);
+    std::string serialize_error;
+    Hash tree_hash = serialize_working_tree(
+        wt, store_, written_hashes, nullptr, &serialize_error);
     if (tree_hash == ZERO_HASH)
-        return {false, ZERO_HASH, "failed to serialize working tree"};
+        return {false, ZERO_HASH,
+                serialize_error.empty()
+                    ? "failed to serialize working tree"
+                    : "failed to serialize working tree: " + serialize_error};
 
     Hash parent;
     bool has_parent = refs_.read_ref(branch_name, parent);

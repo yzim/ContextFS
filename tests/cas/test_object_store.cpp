@@ -141,12 +141,30 @@ static void test_pending_restore_round_trips() {
     std::printf("  PASS test_pending_restore_round_trips\n");
 }
 
+static void test_init_layout_rejects_unwritable_object_shard() {
+    std::string root = make_tmp_dir("unwritable-shard");
+    ObjectStore store(root);
+    REQUIRE(store.init_layout());
+
+    std::string shard = root + "/objects/aa";
+    REQUIRE(mkdir(shard.c_str(), 0755) == 0);
+    REQUIRE(chmod(shard.c_str(), 0555) == 0);
+
+    ObjectStore reopened(root);
+    REQUIRE(!reopened.init_layout());
+
+    REQUIRE(chmod(shard.c_str(), 0755) == 0);
+    remove_dir_recursive(root);
+    std::printf("  PASS test_init_layout_rejects_unwritable_object_shard\n");
+}
+
 int main() {
     std::printf("test_object_store:\n");
     test_fsync_objects_reports_fdatasync_failure();
     test_fsync_shard_dirs_reports_objects_dir_failure();
     test_pending_tracks_new_writes_and_skips_dedup_hits();
     test_pending_restore_round_trips();
+    test_init_layout_rejects_unwritable_object_shard();
     std::printf("PASS test_object_store\n");
     return 0;
 }

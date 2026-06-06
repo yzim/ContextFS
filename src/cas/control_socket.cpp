@@ -1,5 +1,6 @@
 #include "control_socket.h"
 #include "daemon.h"
+#include <cerrno>
 #include <cstdio>
 #include <cstring>
 #include <sys/socket.h>
@@ -18,13 +19,30 @@ bool ControlSocket::start(const std::string& endpoint, RequestHandler handler) {
     socket_path_ = endpoint;
     ::unlink(socket_path_.c_str());
     listen_fd_ = socket(AF_UNIX, SOCK_STREAM, 0);
-    if (listen_fd_ < 0) return false;
+    if (listen_fd_ < 0) {
+        std::fprintf(stderr, "agentvfs: control socket: socket() failed: %s\n",
+                     std::strerror(errno));
+        return false;
+    }
     struct sockaddr_un addr{};
     addr.sun_family = AF_UNIX;
     std::strncpy(addr.sun_path, socket_path_.c_str(), sizeof(addr.sun_path) - 1);
-    if (bind(listen_fd_, (struct sockaddr*)&addr, sizeof(addr)) != 0) return false;
+    if (bind(listen_fd_, (struct sockaddr*)&addr, sizeof(addr)) != 0) {
+        std::fprintf(stderr, "agentvfs: control socket: bind('%s') failed: %s\n",
+                     socket_path_.c_str(), std::strerror(errno));
+        close(listen_fd_);
+        listen_fd_ = -1;
+        return false;
+    }
     chmod(socket_path_.c_str(), 0600);
-    if (listen(listen_fd_, 4) != 0) return false;
+    if (listen(listen_fd_, 4) != 0) {
+        std::fprintf(stderr, "agentvfs: control socket: listen('%s') failed: %s\n",
+                     socket_path_.c_str(), std::strerror(errno));
+        close(listen_fd_);
+        listen_fd_ = -1;
+        ::unlink(socket_path_.c_str());
+        return false;
+    }
     th_ = std::thread([this] { accept_loop(); });
     return true;
 }

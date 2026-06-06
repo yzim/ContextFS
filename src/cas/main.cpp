@@ -28,11 +28,14 @@
 #include "telemetry_drain.h"
 #include "telemetry_registry.h"
 #include "workspace_cli.h"
+#include <cerrno>
 #include <cstdio>
 #include <memory>
 #include <cstdlib>
 #include <cstring>
+#include <fcntl.h>
 #include <string>
+#include <sys/types.h>
 #include <utility>
 #include <unistd.h>
 #include <vector>
@@ -236,9 +239,36 @@ static std::string current_exe_path(char** argv) {
     return (argv && argv[0]) ? std::string(argv[0]) : std::string("agentvfs");
 }
 
+static bool daemonize_before_threads() {
+    pid_t pid = fork();
+    if (pid < 0) {
+        std::fprintf(stderr, "agentvfs: fork failed: %s\n", std::strerror(errno));
+        return false;
+    }
+    if (pid > 0) {
+        _exit(0);
+    }
+
+    if (setsid() < 0) {
+        std::fprintf(stderr, "agentvfs: setsid failed: %s\n", std::strerror(errno));
+        return false;
+    }
+
+    int dev_null = open("/dev/null", O_RDWR);
+    if (dev_null >= 0) {
+        dup2(dev_null, STDIN_FILENO);
+        dup2(dev_null, STDOUT_FILENO);
+        dup2(dev_null, STDERR_FILENO);
+        if (dev_null > STDERR_FILENO) close(dev_null);
+    }
+    return true;
+}
+
 static int run_daemon_main(int argc, char** argv) {
     CasArgs ca;
     if (!parse_args(argc, argv, ca)) return 1;
+
+    if (!ca.foreground && !daemonize_before_threads()) return 1;
 
     cas::Daemon daemon(ca.source, ca.mountpoint, ca.store);
     if (!daemon.initialize()) {
@@ -365,7 +395,10 @@ static int run_daemon_main(int argc, char** argv) {
 
     cas::MountOptions opts;
     opts.mountpoint = ca.mountpoint;
-    opts.foreground = ca.foreground;
+    // The process has already daemonized above when requested. Keep libfuse
+    // in foreground mode so it does not fork after control/telemetry threads
+    // have started; only the calling thread survives such a fork.
+    opts.foreground = true;
     opts.single_threaded = ca.single_threaded;
     opts.passthrough_args = std::move(ca.fuse_passthrough);
     int rc = cas::run_filesystem(daemon, opts);

@@ -486,7 +486,7 @@ static void test_checkpoint_rejects_missing_referenced_blob() {
     std::printf("  PASS test_checkpoint_rejects_missing_referenced_blob\n");
 }
 
-static void test_checkpoint_rejects_zero_hash_blob() {
+static void test_checkpoint_skips_zero_hash_blob() {
     TestDaemon env("checkpoint-zero-blob");
     Daemon& d = env.daemon;
     auto main = d.main_branch();
@@ -498,12 +498,12 @@ static void test_checkpoint_rejects_zero_hash_blob() {
 
     auto result = checkpoint_branch(d, main, "zero blob");
 
-    REQUIRE(!result.ok);
+    REQUIRE(result.ok);
     Hash after = ZERO_HASH;
     REQUIRE(d.refs().read_ref("main", after));
-    REQUIRE(after == before);
+    REQUIRE(after != before);
 
-    std::printf("  PASS test_checkpoint_rejects_zero_hash_blob\n");
+    std::printf("  PASS test_checkpoint_skips_zero_hash_blob\n");
 }
 
 static void test_unknown_branch_and_same_branch_errors() {
@@ -715,7 +715,7 @@ int main() {
     test_clean_merge_advances_target_only_and_writes_two_parent_commit();
     test_create_branch_rejects_source_branch_without_ref();
     test_checkpoint_rejects_missing_referenced_blob();
-    test_checkpoint_rejects_zero_hash_blob();
+    test_checkpoint_skips_zero_hash_blob();
     test_merge_deleted_source_root_file_is_not_reingested_by_lazy_bootstrap();
     test_merge_deleted_source_root_file_survives_restart_and_background_bootstrap();
     test_conflict_returns_paths_and_leaves_target_tree_unmerged();

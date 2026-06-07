@@ -7,16 +7,61 @@
 #include <filesystem>
 #include <random>
 #include <set>
+#include <utility>
 
 namespace cas {
 
 namespace fs = std::filesystem;
+
+namespace {
+
+bool validate_object_shards_writable(const std::string& objects_dir) {
+#ifdef _WIN32
+    (void)objects_dir;
+    return true;
+#else
+    std::error_code ec;
+    for (auto it = fs::directory_iterator(objects_dir, ec);
+         !ec && it != fs::directory_iterator(); it.increment(ec))
+    {
+        std::error_code type_ec;
+        if (!it->is_directory(type_ec)) continue;
+
+        std::string path = it->path().string();
+        if (::access(path.c_str(), W_OK | X_OK) != 0) {
+            std::fprintf(stderr,
+                "agentvfs: init_layout: object shard '%s' is not writable: %s\n",
+                path.c_str(), std::strerror(errno));
+            return false;
+        }
+    }
+    if (ec) {
+        std::fprintf(stderr,
+            "agentvfs: init_layout: scan object shards in '%s' failed: %s\n",
+            objects_dir.c_str(), ec.message().c_str());
+        return false;
+    }
+    return true;
+#endif
+}
+
+} // namespace
 
 ObjectStore::ObjectStore(const std::string& store_root)
     : store_root_(store_root)
     , objects_dir_(store_root + "/objects")
     , tmp_dir_(store_root + "/tmp")
 {}
+
+std::string ObjectStore::last_error() const {
+    std::lock_guard<std::mutex> lk(error_mu_);
+    return last_error_;
+}
+
+void ObjectStore::set_last_error(std::string error) const {
+    std::lock_guard<std::mutex> lk(error_mu_);
+    last_error_ = std::move(error);
+}
 
 bool ObjectStore::init_layout() {
     std::string refs_dir      = store_root_ + "/refs";
@@ -46,6 +91,7 @@ bool ObjectStore::init_layout() {
         (void)wr;
         close(fd);
     }
+    if (!validate_object_shards_writable(objects_dir_)) return false;
     return true;
 }
 
@@ -73,6 +119,7 @@ static std::string random_tmp_name() {
 }
 
 Hash ObjectStore::write_object(const char* type_tag, const uint8_t* body, size_t body_len) {
+    set_last_error("");
     size_t tag_len = std::strlen(type_tag);
 
     blake3_hasher hasher;
@@ -88,21 +135,41 @@ Hash ObjectStore::write_object(const char* type_tag, const uint8_t* body, size_t
     {
         std::error_code ec;
         fs::create_directory(shard, ec);
-        if (ec) return ZERO_HASH;
+        if (ec) {
+            set_last_error(std::string("write ") + type_tag +
+                           " object: create_directory('" + shard +
+                           "') failed: " + ec.message());
+            return ZERO_HASH;
+        }
     }
 
     std::string tmp_path = tmp_dir_ + "/" + random_tmp_name();
     int fd = open(tmp_path.c_str(), O_WRONLY | O_CREAT | O_TRUNC | O_BINARY, 0444);
-    if (fd < 0) return ZERO_HASH;
+    if (fd < 0) {
+        set_last_error(std::string("write ") + type_tag +
+                       " object: open('" + tmp_path +
+                       "') failed: " + std::strerror(errno));
+        return ZERO_HASH;
+    }
 
     bool ok = true;
-    if (::write(fd, type_tag, tag_len) != (ssize_t)tag_len) ok = false;
-    if (ok && body_len > 0 && ::write(fd, body, body_len) != (ssize_t)body_len) ok = false;
+    std::string write_error;
+    if (::write(fd, type_tag, tag_len) != (ssize_t)tag_len) {
+        ok = false;
+        write_error = std::strerror(errno);
+    }
+    if (ok && body_len > 0 && ::write(fd, body, body_len) != (ssize_t)body_len) {
+        ok = false;
+        write_error = std::strerror(errno);
+    }
     close(fd);
 
     if (!ok) {
         std::error_code rec;
         fs::remove(tmp_path, rec);
+        set_last_error(std::string("write ") + type_tag +
+                       " object: write('" + tmp_path +
+                       "') failed: " + write_error);
         return ZERO_HASH;
     }
 
@@ -112,6 +179,10 @@ Hash ObjectStore::write_object(const char* type_tag, const uint8_t* body, size_t
     if (rec) {
         std::error_code rmec;
         fs::remove(tmp_path, rmec);
+        set_last_error(std::string("write ") + type_tag +
+                       " object: rename('" + tmp_path +
+                       "', '" + target +
+                       "') failed: " + rec.message());
         return ZERO_HASH;
     }
 

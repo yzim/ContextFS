@@ -27,6 +27,7 @@ public:
 
     bool object_exists(const Hash& hash) const;
     std::string object_path(const Hash& hash) const;
+    std::string last_error() const;
 
     const std::string& root() const { return store_root_; }
     const std::string& tmp_dir() const { return tmp_dir_; }
@@ -46,6 +47,7 @@ public:
 private:
     Hash write_object(const char* type_tag, const uint8_t* body, size_t body_len);
     bool read_object(const Hash& hash, const char* expected_tag, std::vector<uint8_t>& out);
+    void set_last_error(std::string error) const;
 
     std::string store_root_;
     std::string objects_dir_;
@@ -53,6 +55,9 @@ private:
 
     mutable std::mutex pending_mu_;
     std::set<Hash> pending_;
+
+    mutable std::mutex error_mu_;
+    mutable std::string last_error_;
 };
 
 } // namespace cas

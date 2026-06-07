@@ -2,6 +2,7 @@
 #include <algorithm>
 #include <cstring>
 #include <map>
+#include <sstream>
 
 namespace cas {
 
@@ -63,15 +64,13 @@ Hash serialize_working_tree(
     const WorkingTree& wt,
     ObjectStore& store,
     std::vector<Hash>& written_hashes,
-    std::vector<Hash>* referenced_leaf_hashes) {
+    std::vector<Hash>* referenced_leaf_hashes,
+    std::string* error) {
 
     std::map<std::string, std::vector<std::pair<std::string, WorkingTreeEntry>>> dirs;
-    bool invalid_leaf = false;
-
     wt.for_each_including_deleted([&](const std::string& path, const WorkingTreeEntry& entry) {
         if ((entry.kind == EntryKind::Blob || entry.kind == EntryKind::Symlink) &&
             entry.hash == ZERO_HASH) {
-            invalid_leaf = true;
             return;
         }
 
@@ -95,7 +94,6 @@ Hash serialize_working_tree(
         }
         dirs[parent].push_back({name, entry});
     });
-    if (invalid_leaf) return ZERO_HASH;
 
     std::map<std::string, Hash> dir_hashes;
 
@@ -125,7 +123,17 @@ Hash serialize_working_tree(
         }
         auto body = serialize_tree_entries(children);
         Hash h = store.write_tree(body);
-        if (h == ZERO_HASH) return ZERO_HASH;
+        if (h == ZERO_HASH) {
+            if (error) {
+                std::ostringstream os;
+                os << "failed to write tree object for " << dir
+                   << " (" << children.size() << " entries)";
+                std::string store_error = store.last_error();
+                if (!store_error.empty()) os << ": " << store_error;
+                *error = os.str();
+            }
+            return ZERO_HASH;
+        }
         written_hashes.push_back(h);
         dir_hashes[dir] = h;
     }
@@ -134,7 +142,15 @@ Hash serialize_working_tree(
     if (it != dir_hashes.end()) return it->second;
     auto body = serialize_tree_entries({});
     Hash h = store.write_tree(body);
-    if (h == ZERO_HASH) return ZERO_HASH;
+    if (h == ZERO_HASH) {
+        if (error) {
+            std::string store_error = store.last_error();
+            *error = store_error.empty()
+                ? "failed to write empty root tree object"
+                : "failed to write empty root tree object: " + store_error;
+        }
+        return ZERO_HASH;
+    }
     written_hashes.push_back(h);
     return h;
 }

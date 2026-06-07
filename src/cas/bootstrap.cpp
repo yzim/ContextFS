@@ -59,6 +59,7 @@ void Bootstrap::ingest_entry(const std::string& vpath,
         Hash h = store_.write_blob(
             reinterpret_cast<const uint8_t*>(target_str.data()),
             target_str.size());
+        if (h == ZERO_HASH) return;
         wt_.insert(vpath, {EntryKind::Symlink, h, mode});
     } else if (st.type() == fs::file_type::regular) {
         std::uintmax_t size = fs::file_size(source_abspath, ec);
@@ -70,6 +71,7 @@ void Bootstrap::ingest_entry(const std::string& vpath,
                 static_cast<std::streamsize>(size));
         data.resize(static_cast<size_t>(in.gcount()));
         Hash h = store_.write_blob(data);
+        if (h == ZERO_HASH) return;
         wt_.insert(vpath, {EntryKind::Blob, h, mode});
     }
 }

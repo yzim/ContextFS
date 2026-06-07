@@ -6,11 +6,16 @@ SRC="$ROOT/src"
 MNT="$ROOT/mnt"
 STORE="$ROOT/store"
 SOCK="$ROOT/control.sock"
+SRC_NOF="$ROOT/src-no-f"
+MNT_NOF="$ROOT/mnt-no-f"
+STORE_NOF="$ROOT/store-no-f"
+SOCK_NOF="$ROOT/control-no-f.sock"
 BIN="$(pwd)/build/agentvfs"
 CTL="$(pwd)/build/agentvfs-ctl"
 
 cleanup() {
     fusermount3 -u "$MNT" 2>/dev/null || true
+    fusermount3 -u "$MNT_NOF" 2>/dev/null || true
     kill %1 2>/dev/null || true
     wait 2>/dev/null || true
     rm -rf "$ROOT"
@@ -162,5 +167,22 @@ set +e
 RC=$?
 set -e
 [[ "$RC" -eq 3 ]] || { echo "FAIL: bad socket should exit 3 (got $RC)"; exit 1; }
+
+# 14. without -f, daemonization must not leave a dead listening socket
+mkdir -p "$SRC_NOF" "$MNT_NOF"
+echo "daemonized" > "$SRC_NOF/a.txt"
+"$BIN" --source "$SRC_NOF" --mountpoint "$MNT_NOF" --store "$STORE_NOF" \
+       --control-sock "$SOCK_NOF" --telemetry=none -s
+
+for _ in $(seq 1 50); do
+    if [[ -S "$SOCK_NOF" ]] && mountpoint -q "$MNT_NOF"; then break; fi
+    sleep 0.1
+done
+[[ -S "$SOCK_NOF" ]] || { echo "FAIL: no-f control socket not ready"; exit 1; }
+mountpoint -q "$MNT_NOF" || { echo "FAIL: no-f mount not ready"; exit 1; }
+
+NOF_STATUS="$(timeout 5 "$CTL" --sock "$SOCK_NOF" status)"
+grep -q '"ok":true' <<<"$NOF_STATUS" || { echo "FAIL: no-f status resp=$NOF_STATUS"; exit 1; }
+fusermount3 -u "$MNT_NOF"
 
 echo "PASS test_agentvfs_ctl"

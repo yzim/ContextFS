@@ -34,6 +34,7 @@ Daemon::Daemon(std::string source_root, std::string mount_point, std::string sto
     session_id_ = now_ns();
     main_branch_ = std::make_shared<BranchContext>(0, "main");
     branches_[0] = main_branch_;
+    branch_name_ids_["main"] = 0;
 }
 
 Daemon::~Daemon() {
@@ -167,20 +168,14 @@ void Daemon::load_persisted_branches() {
             continue;
         }
 
-        std::lock_guard<std::mutex> lk(branches_mu_);
-        bool duplicate = false;
-        for (auto& [_, existing] : branches_) {
-            if (existing->name == name) {
-                duplicate = true;
-                break;
-            }
-        }
-        if (duplicate) {
+        std::unique_lock<std::shared_mutex> lk(branches_mu_);
+        if (branch_name_ids_.find(name) != branch_name_ids_.end()) {
             std::fprintf(stderr,
                          "agentvfs: warning: skipping persisted branch '%s': duplicate branch name\n",
                          name.c_str());
             continue;
         }
+        branch_name_ids_[name] = id;
         branches_[id] = std::move(branch);
     }
 }
@@ -260,16 +255,17 @@ void Daemon::invalidate_fhs_for_branch(uint32_t branch_id) {
 }
 
 std::shared_ptr<BranchContext> Daemon::branch(uint32_t id) {
-    std::lock_guard<std::mutex> lk(branches_mu_);
+    std::shared_lock<std::shared_mutex> lk(branches_mu_);
     auto it = branches_.find(id);
     return (it != branches_.end()) ? it->second : nullptr;
 }
 
 std::shared_ptr<BranchContext> Daemon::branch_by_name(const std::string& name) {
-    std::lock_guard<std::mutex> lk(branches_mu_);
-    for (auto& [_, br] : branches_)
-        if (br->name == name) return br;
-    return nullptr;
+    std::shared_lock<std::shared_mutex> lk(branches_mu_);
+    auto nit = branch_name_ids_.find(name);
+    if (nit == branch_name_ids_.end()) return nullptr;
+    auto it = branches_.find(nit->second);
+    return (it != branches_.end()) ? it->second : nullptr;
 }
 
 std::shared_ptr<BranchContext> Daemon::branch_by_name_locked(
@@ -277,13 +273,24 @@ std::shared_ptr<BranchContext> Daemon::branch_by_name_locked(
     std::unique_lock<std::mutex>& checkpoint_lock) {
 
     checkpoint_lock = std::unique_lock<std::mutex>();
-    std::lock_guard<std::mutex> lk(branches_mu_);
-    for (auto& [_, br] : branches_) {
-        if (br->name != name) continue;
-        checkpoint_lock = std::unique_lock<std::mutex>(br->checkpoint_mu);
-        return br;
+    std::shared_lock<std::shared_mutex> branches_lk(branches_mu_);
+    auto nit = branch_name_ids_.find(name);
+    if (nit == branch_name_ids_.end()) {
+        return nullptr;
     }
-    return nullptr;
+    auto it = branches_.find(nit->second);
+    if (it == branches_.end()) {
+        return nullptr;
+    }
+    auto br = it->second;
+    if (!br) {
+        checkpoint_lock = std::unique_lock<std::mutex>();
+        return nullptr;
+    }
+    // Keep the shared branch-map lock until checkpoint_mu is acquired.
+    // This preserves the delete lock order: branches_mu_ -> checkpoint_mu.
+    checkpoint_lock = std::unique_lock<std::mutex>(br->checkpoint_mu);
+    return br;
 }
 
 std::shared_ptr<BranchContext> Daemon::branch_for_pid(Pid pid) {
@@ -292,29 +299,122 @@ std::shared_ptr<BranchContext> Daemon::branch_for_pid(Pid pid) {
     return br ? br : main_branch_;
 }
 
-uint32_t Daemon::create_branch(const std::string& name, const std::string& from) {
-    // Keep branch creation serialized under branches_mu_. This preserves the
-    // global lock order used by delete/merge (branches_mu_ -> checkpoint_mu)
-    // and prevents duplicate creators from racing ref writes and cleanup.
-    std::shared_ptr<BranchContext> src_snap;
-    Hash src_commit = ZERO_HASH;
-    std::lock_guard<std::mutex> lk(branches_mu_);
-    for (auto& [_, br] : branches_) {
-        if (br->name == from) { src_snap = br; }
-        if (br->name == name) return UINT32_MAX;
+CheckpointResult Daemon::checkpoint_branch(
+    const std::shared_ptr<BranchContext>& br,
+    const std::string& label) {
+
+    if (!br) return {false, ZERO_HASH, "unknown branch"};
+
+    std::unique_lock<std::mutex> checkpoint_lk;
+    {
+        std::shared_lock<std::shared_mutex> branches_lk(branches_mu_);
+        auto it = branches_.find(br->branch_id);
+        if (it == branches_.end() || it->second != br) {
+            return {false, ZERO_HASH, "unknown branch"};
+        }
+        // Hold branches_mu_ until checkpoint_mu is acquired so delete_branch()
+        // cannot remove refs/<branch> between publication validation and the
+        // checkpoint ref write.
+        checkpoint_lk = std::unique_lock<std::mutex>(br->checkpoint_mu);
     }
-    if (!src_snap) return UINT32_MAX;
+
+    uint32_t bid = br->branch_id;
+    return cm_.checkpoint_locked(
+        label,
+        session_id_,
+        policy_version_.load(),
+        br->wt,
+        [this, bid, br] { return flush_fhs_for_branch(bid, br->wt); },
+        br->name);
+}
+
+CheckpointResult Daemon::checkpoint_branch_by_name(
+    const std::string& branch_name,
+    const std::string& label) {
+
+    std::unique_lock<std::mutex> checkpoint_lk;
+    auto br = branch_by_name_locked(branch_name, checkpoint_lk);
+    if (!br) return {false, ZERO_HASH, "unknown branch"};
+
+    uint32_t bid = br->branch_id;
+    return cm_.checkpoint_locked(
+        label,
+        session_id_,
+        policy_version_.load(),
+        br->wt,
+        [this, bid, br] { return flush_fhs_for_branch(bid, br->wt); },
+        br->name);
+}
+
+uint32_t Daemon::create_branch(const std::string& name, const std::string& from) {
+    std::shared_ptr<BranchContext> src_snap;
+    {
+        std::unique_lock<std::shared_mutex> lk(branches_mu_);
+        if (branch_name_ids_.find(name) != branch_name_ids_.end()) return UINT32_MAX;
+        if (branch_create_reservations_.find(name) != branch_create_reservations_.end())
+            return UINT32_MAX;
+
+        auto nit = branch_name_ids_.find(from);
+        if (nit == branch_name_ids_.end()) return UINT32_MAX;
+        auto it = branches_.find(nit->second);
+        if (it == branches_.end()) return UINT32_MAX;
+
+        src_snap = it->second;
+        branch_create_reservations_.insert(name);
+        branch_source_reservations_[from]++;
+    }
+
+    auto clear_reservation = [this, &name] {
+        std::unique_lock<std::shared_mutex> lk(branches_mu_);
+        branch_create_reservations_.erase(name);
+    };
+    auto clear_source_reservation = [this, &from] {
+        std::unique_lock<std::shared_mutex> lk(branches_mu_);
+        auto it = branch_source_reservations_.find(from);
+        if (it == branch_source_reservations_.end()) return;
+        if (it->second <= 1) branch_source_reservations_.erase(it);
+        else it->second--;
+    };
+    auto clear_reservations = [&] {
+        clear_reservation();
+        clear_source_reservation();
+    };
 
     uint32_t id = next_branch_id_.fetch_add(1);
+    Hash src_commit = ZERO_HASH;
     std::shared_ptr<BranchContext> br;
     {
         std::lock_guard<std::mutex> src_lk(src_snap->checkpoint_mu);
-        if (!refs_.read_ref(from, src_commit)) return UINT32_MAX;
+        if (!refs_.read_ref(from, src_commit)) {
+            clear_reservations();
+            return UINT32_MAX;
+        }
         br = std::make_shared<BranchContext>(id, name, src_snap->wt.clone());
     }
-    if (!refs_.write_ref(name, src_commit, store_.tmp_dir())) return UINT32_MAX;
 
-    branches_[id] = std::move(br);
+    if (!refs_.write_ref(name, src_commit, store_.tmp_dir())) {
+        clear_reservations();
+        return UINT32_MAX;
+    }
+
+    {
+        std::unique_lock<std::shared_mutex> lk(branches_mu_);
+        branch_create_reservations_.erase(name);
+        auto sit = branch_source_reservations_.find(from);
+        if (sit != branch_source_reservations_.end()) {
+            if (sit->second <= 1) branch_source_reservations_.erase(sit);
+            else sit->second--;
+        }
+        if (branch_name_ids_.find(name) != branch_name_ids_.end()) {
+            std::fprintf(stderr,
+                         "agentvfs: create_branch invariant violated: "
+                         "reserved branch '%s' was already published\n",
+                         name.c_str());
+            return UINT32_MAX;
+        }
+        branch_name_ids_[name] = id;
+        branches_[id] = std::move(br);
+    }
     return id;
 }
 
@@ -330,7 +430,7 @@ BranchMergeResult Daemon::merge_branch(
     std::unique_lock<std::mutex> second_checkpoint_lk;
 
     {
-        std::unique_lock<std::mutex> branches_lk(branches_mu_);
+        std::unique_lock<std::shared_mutex> branches_lk(branches_mu_);
         for (auto& [_, br] : branches_) {
             if (br->name == source_name) source = br;
             if (br->name == target_name) target = br;
@@ -448,19 +548,24 @@ bool Daemon::delete_branch(const std::string& name) {
     // the underlying memory stays valid until the last ref drops.
     std::shared_ptr<BranchContext> br;
     {
-        std::lock_guard<std::mutex> lk(branches_mu_);
-        for (auto& [id, b] : branches_) {
-            if (b->name == name) { br = b; break; }
-        }
+        std::unique_lock<std::shared_mutex> lk(branches_mu_);
+        auto nit = branch_name_ids_.find(name);
+        if (nit == branch_name_ids_.end()) return false;
+        auto it = branches_.find(nit->second);
+        if (it == branches_.end()) return false;
+        br = it->second;
         if (!br) return false;
+        if (branch_source_reservations_.find(name) != branch_source_reservations_.end())
+            return false;
         if (router_.has_cgroup_for_branch(br->branch_id)) return false;
 
         // Take the branch's checkpoint_mu *after* branches_mu_: this
         // matches the lock order used by FUSE ops (which never hold
         // branches_mu_) so there is no inversion risk.
         std::lock_guard<std::mutex> br_lk(br->checkpoint_mu);
+        if (!refs_.remove_ref(name)) return false;
         invalidate_fhs_for_branch(br->branch_id);
-        refs_.remove_ref(name);
+        branch_name_ids_.erase(name);
         branches_.erase(br->branch_id);
     }
     // br's destructor runs here or later, once every shared_ptr holder is done.
@@ -468,7 +573,7 @@ bool Daemon::delete_branch(const std::string& name) {
 }
 
 std::vector<std::shared_ptr<BranchContext>> Daemon::list_branches() {
-    std::lock_guard<std::mutex> lk(branches_mu_);
+    std::shared_lock<std::shared_mutex> lk(branches_mu_);
     std::vector<std::shared_ptr<BranchContext>> result;
     for (auto& [_, br] : branches_) result.push_back(br);
     return result;

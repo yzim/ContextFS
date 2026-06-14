@@ -51,6 +51,8 @@ void ControlSocket::stop() {
     stop_ = true;
     if (listen_fd_ >= 0) { ::shutdown(listen_fd_, SHUT_RDWR); close(listen_fd_); listen_fd_ = -1; }
     if (th_.joinable()) th_.join();
+    std::unique_lock<std::mutex> lk(workers_mu_);
+    workers_cv_.wait(lk, [this] { return active_workers_ == 0; });
     ::unlink(socket_path_.c_str());
 }
 
@@ -58,21 +60,36 @@ void ControlSocket::accept_loop() {
     while (!stop_.load()) {
         int c = accept(listen_fd_, nullptr, nullptr);
         if (c < 0) { if (stop_.load()) return; continue; }
-        std::string buf;
-        char ch;
-        while (read(c, &ch, 1) == 1) {
-            if (ch == '\n') {
-                std::string resp = handler_(buf) + "\n";
-                ssize_t n = write(c, resp.data(), resp.size());
-                (void)n;
-                buf.clear();
-            } else {
-                buf.push_back(ch);
-                if (buf.size() > 64 * 1024) break;
-            }
+        {
+            std::lock_guard<std::mutex> lk(workers_mu_);
+            active_workers_++;
         }
-        close(c);
+        std::thread([this, c] {
+            serve_client(c);
+            {
+                std::lock_guard<std::mutex> lk(workers_mu_);
+                active_workers_--;
+            }
+            workers_cv_.notify_all();
+        }).detach();
     }
+}
+
+void ControlSocket::serve_client(int fd) {
+    std::string buf;
+    char ch;
+    while (read(fd, &ch, 1) == 1) {
+        if (ch == '\n') {
+            std::string resp = handler_(buf) + "\n";
+            ssize_t n = write(fd, resp.data(), resp.size());
+            (void)n;
+            buf.clear();
+        } else {
+            buf.push_back(ch);
+            if (buf.size() > 64 * 1024) break;
+        }
+    }
+    close(fd);
 }
 
 } // namespace cas

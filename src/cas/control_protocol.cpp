@@ -427,16 +427,7 @@ std::string dispatch(Daemon& daemon, std::string_view line_sv) {
         if (!parse_rest_with_branch(rest, label, branch_name))
             return json_err("ambiguous 'branch=' token in label");
 
-        std::unique_lock<std::mutex> checkpoint_lk;
-        auto br = daemon.branch_by_name_locked(branch_name, checkpoint_lk);
-        if (!br) return json_err("unknown branch");
-
-        uint32_t bid = br->branch_id;
-        auto r = daemon.checkpoint_mgr().checkpoint_locked(
-            label, daemon.session_id(), daemon.policy_version(),
-            br->wt,
-            [&daemon, bid, br] { return daemon.flush_fhs_for_branch(bid, br->wt); },
-            branch_name);
+        auto r = daemon.checkpoint_branch_by_name(branch_name, label);
         if (!r.ok) return json_err(r.error);
         return json_ok_str("commit", hash_to_hex(r.commit_hash));
     }

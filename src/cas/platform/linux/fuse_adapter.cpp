@@ -6,6 +6,8 @@
 #include "branch_context.h"
 #include "commit.h"
 #include "tree_serialize.h"
+#include "fast_control.h"
+#include "hash.h"
 #include <algorithm>
 #include <cerrno>
 #include <cstring>
@@ -42,7 +44,50 @@ static int errno_to_err() {
     return -e;
 }
 
+static bool is_fast_control_path(const char* path) {
+    return path && std::strcmp(path, AGENTVFS_FAST_CONTROL_PATH) == 0;
+}
+
+static bool is_fast_control_descendant(const char* path) {
+    constexpr size_t kControlLen = sizeof(AGENTVFS_FAST_CONTROL_PATH) - 1;
+    return path &&
+           std::strncmp(path, AGENTVFS_FAST_CONTROL_PATH, kControlLen) == 0 &&
+           path[kControlLen] == '/';
+}
+
+static bool touches_fast_control_path(const char* path) {
+    return is_fast_control_path(path) || is_fast_control_descendant(path);
+}
+
+static bool touches_fast_control_path(const char* a, const char* b) {
+    return touches_fast_control_path(a) || touches_fast_control_path(b);
+}
+
+static int fast_control_mutation_error(const char* path) {
+    return is_fast_control_descendant(path) ? -ENOTDIR : -EACCES;
+}
+
+static void fill_fast_control_attr(struct stat* st) {
+    std::memset(st, 0, sizeof(*st));
+    st->st_mode = S_IFREG | 0600;
+    st->st_nlink = 1;
+    st->st_uid = fuse_get_context()->uid;
+    st->st_gid = fuse_get_context()->gid;
+    st->st_size = 0;
+}
+
+static size_t bounded_strlen(const char* s, size_t max) {
+    size_t n = 0;
+    while (n < max && s[n] != '\0') n++;
+    return n;
+}
+
 static int cas_getattr(const char* path, struct stat* st, struct fuse_file_info* fi) {
+    if (is_fast_control_path(path)) {
+        fill_fast_control_attr(st);
+        return 0;
+    }
+    if (is_fast_control_descendant(path)) return -ENOTDIR;
     Daemon* d = get_daemon();
     if (Daemon::is_hidden(path)) return -ENOENT;
     if (auto* bs = d->bootstrap()) bs->ensure_path(path);
@@ -95,6 +140,14 @@ static int cas_getattr(const char* path, struct stat* st, struct fuse_file_info*
 }
 
 static int cas_open(const char* path, struct fuse_file_info* fi) {
+    if (is_fast_control_path(path)) {
+        int accmode = fi->flags & O_ACCMODE;
+        if (accmode != O_RDONLY) return -EACCES;
+        if (fi->flags & (O_TRUNC | O_APPEND)) return -EACCES;
+        fi->direct_io = 1;
+        return 0;
+    }
+    if (is_fast_control_descendant(path)) return -ENOTDIR;
     Daemon* d = get_daemon();
     if (Daemon::is_hidden(path)) return -ENOENT;
     if (auto* bs = d->bootstrap()) bs->ensure_path(path);
@@ -140,6 +193,7 @@ static int cas_open(const char* path, struct fuse_file_info* fi) {
 }
 
 static int cas_create(const char* path, mode_t mode, struct fuse_file_info* fi) {
+    if (touches_fast_control_path(path)) return fast_control_mutation_error(path);
     Daemon* d = get_daemon();
     if (Daemon::is_hidden(path)) return -EACCES;
 
@@ -250,12 +304,14 @@ static int cas_readdir(const char* path, void* buf, fuse_fill_dir_t filler,
         auto slash = base.rfind('/');
         if (slash != std::string::npos) base = base.substr(slash + 1);
         if (base == ".agentvfs-store") continue;
+        if (base == ".agentvfs-control") continue;
         filler(buf, base.c_str(), nullptr, 0, (fuse_fill_dir_flags)0);
     }
     return 0;
 }
 
 static int cas_truncate(const char* path, off_t length, struct fuse_file_info* fi) {
+    if (touches_fast_control_path(path)) return fast_control_mutation_error(path);
     Daemon* d = get_daemon();
     if (Daemon::is_hidden(path)) return -EACCES;
     if (auto* bs = d->bootstrap()) bs->ensure_path(path);
@@ -285,6 +341,12 @@ static int cas_truncate(const char* path, off_t length, struct fuse_file_info* f
 }
 
 static int cas_access(const char* path, int mask) {
+    if (is_fast_control_path(path)) {
+        if (mask & W_OK) return -EACCES;
+        if (mask & X_OK) return -EACCES;
+        return 0;
+    }
+    if (is_fast_control_descendant(path)) return -ENOTDIR;
     Daemon* d = get_daemon();
     if (Daemon::is_hidden(path)) return -ENOENT;
     if (std::strcmp(path, "/") == 0) return 0;
@@ -312,6 +374,7 @@ static int cas_statfs(const char* path, struct statvfs* stat) {
 }
 
 static int cas_unlink(const char* path) {
+    if (touches_fast_control_path(path)) return fast_control_mutation_error(path);
     Daemon* d = get_daemon();
     if (Daemon::is_hidden(path)) return -EACCES;
     if (auto* bs = d->bootstrap()) bs->ensure_path(path);
@@ -325,6 +388,7 @@ static int cas_unlink(const char* path) {
 }
 
 static int cas_rmdir(const char* path) {
+    if (touches_fast_control_path(path)) return fast_control_mutation_error(path);
     Daemon* d = get_daemon();
     if (Daemon::is_hidden(path)) return -EACCES;
     if (auto* bs = d->bootstrap()) bs->ensure_path(path);
@@ -340,6 +404,7 @@ static int cas_rmdir(const char* path) {
 }
 
 static int cas_mkdir(const char* path, mode_t mode) {
+    if (touches_fast_control_path(path)) return fast_control_mutation_error(path);
     Daemon* d = get_daemon();
     if (Daemon::is_hidden(path)) return -EACCES;
     if (auto* bs = d->bootstrap()) bs->ensure_path(path);
@@ -352,6 +417,7 @@ static int cas_mkdir(const char* path, mode_t mode) {
 
 static int cas_rename(const char* from, const char* to, unsigned int flags) {
     (void)flags;
+    if (touches_fast_control_path(from, to)) return -EACCES;
     Daemon* d = get_daemon();
     if (Daemon::is_hidden(from) || Daemon::is_hidden(to)) return -EACCES;
     if (auto* bs = d->bootstrap()) { bs->ensure_path(from); bs->ensure_path(to); }
@@ -369,6 +435,7 @@ static int cas_rename(const char* from, const char* to, unsigned int flags) {
 }
 
 static int cas_symlink(const char* target, const char* linkpath) {
+    if (touches_fast_control_path(linkpath)) return fast_control_mutation_error(linkpath);
     Daemon* d = get_daemon();
     if (Daemon::is_hidden(linkpath)) return -EACCES;
     if (auto* bs = d->bootstrap()) bs->ensure_path(linkpath);
@@ -382,6 +449,8 @@ static int cas_symlink(const char* target, const char* linkpath) {
 }
 
 static int cas_readlink(const char* path, char* buf, size_t size) {
+    if (is_fast_control_path(path)) return -EINVAL;
+    if (is_fast_control_descendant(path)) return -ENOTDIR;
     Daemon* d = get_daemon();
     if (Daemon::is_hidden(path)) return -ENOENT;
     if (auto* bs = d->bootstrap()) bs->ensure_path(path);
@@ -401,6 +470,7 @@ static int cas_utimens(const char* path, const struct timespec tv[2],
                         struct fuse_file_info* fi) {
     (void)tv;
     (void)fi;
+    if (touches_fast_control_path(path)) return fast_control_mutation_error(path);
     Daemon* d = get_daemon();
     if (Daemon::is_hidden(path)) return -ENOENT;
     if (auto* bs = d->bootstrap()) bs->ensure_path(path);
@@ -412,6 +482,7 @@ static int cas_utimens(const char* path, const struct timespec tv[2],
 
 static int cas_chmod(const char* path, mode_t mode, struct fuse_file_info* fi) {
     (void)fi;
+    if (touches_fast_control_path(path)) return fast_control_mutation_error(path);
     Daemon* d = get_daemon();
     if (Daemon::is_hidden(path)) return -ENOENT;
     if (auto* bs = d->bootstrap()) bs->ensure_path(path);
@@ -429,12 +500,56 @@ static int cas_chown(const char* path, uid_t uid, gid_t gid,
     (void)uid;
     (void)gid;
     (void)fi;
+    if (touches_fast_control_path(path)) return fast_control_mutation_error(path);
     Daemon* d = get_daemon();
     if (Daemon::is_hidden(path)) return -ENOENT;
     if (auto* bs = d->bootstrap()) bs->ensure_path(path);
     auto br = resolve_branch(d);
     auto entry = br->wt.lookup(path);
     if (!entry) return -ENOENT;
+    return 0;
+}
+
+static int cas_ioctl(const char* path, int cmd, void* arg,
+                     struct fuse_file_info* fi, unsigned int flags, void* data) {
+    (void)arg;
+    (void)fi;
+    (void)flags;
+    if (!is_fast_control_path(path)) return -ENOTTY;
+    if (static_cast<unsigned int>(cmd) != AGENTVFS_IOC_CHECKPOINT) return -ENOTTY;
+
+    auto* req = reinterpret_cast<agentvfs_checkpoint_ioc*>(data);
+    if (!req) return -EINVAL;
+    if (req->version != AGENTVFS_FAST_CONTROL_VERSION) {
+        req->result_errno = EINVAL;
+        std::snprintf(req->error, sizeof(req->error), "unsupported fast control version");
+        return 0;
+    }
+    if (req->flags != 0) {
+        req->result_errno = EINVAL;
+        std::snprintf(req->error, sizeof(req->error), "unsupported flags");
+        return 0;
+    }
+    size_t label_len = bounded_strlen(req->label, sizeof(req->label));
+    if (label_len == sizeof(req->label)) {
+        req->result_errno = EINVAL;
+        std::snprintf(req->error, sizeof(req->error), "checkpoint label is not nul-terminated");
+        return 0;
+    }
+
+    Daemon* d = get_daemon();
+    auto br = resolve_branch(d);
+    auto r = d->checkpoint_branch(br, std::string(req->label, label_len));
+    if (!r.ok) {
+        req->result_errno = EIO;
+        std::snprintf(req->error, sizeof(req->error), "%s", r.error.c_str());
+        return 0;
+    }
+
+    std::snprintf(req->commit_hex, sizeof(req->commit_hex), "%s",
+                  hash_to_hex(r.commit_hash).c_str());
+    req->result_errno = 0;
+    req->error[0] = '\0';
     return 0;
 }
 
@@ -460,6 +575,7 @@ static void fill_fuse_ops(struct fuse_operations& ops) {
     ops.utimens   = cas_utimens;
     ops.chmod     = cas_chmod;
     ops.chown     = cas_chown;
+    ops.ioctl     = cas_ioctl;
 }
 
 int run_filesystem(Daemon& daemon, const MountOptions& opts) {

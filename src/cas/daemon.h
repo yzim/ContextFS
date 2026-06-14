@@ -15,8 +15,10 @@
 #include <map>
 #include <memory>
 #include <mutex>
+#include <shared_mutex>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 namespace cas {
@@ -94,6 +96,13 @@ public:
     std::shared_ptr<BranchContext> branch_for_pid(Pid pid);
     BranchRouter& router() { return router_; }
 
+    CheckpointResult checkpoint_branch(
+        const std::shared_ptr<BranchContext>& branch,
+        const std::string& label);
+    CheckpointResult checkpoint_branch_by_name(
+        const std::string& branch_name,
+        const std::string& label);
+
     uint32_t create_branch(const std::string& name, const std::string& from);
     BranchMergeResult merge_branch(const std::string& source_name,
                                    const std::string& target_name,
@@ -148,8 +157,11 @@ private:
     std::unordered_map<uint64_t, std::shared_ptr<FhState>> fh_table_;
     std::atomic<uint64_t> next_fh_id_{1};
 
-    std::mutex branches_mu_;
+    mutable std::shared_mutex branches_mu_;
     std::map<uint32_t, std::shared_ptr<BranchContext>> branches_;
+    std::unordered_map<std::string, uint32_t> branch_name_ids_;
+    std::unordered_set<std::string> branch_create_reservations_;
+    std::unordered_map<std::string, uint32_t> branch_source_reservations_;
     // Permanent shared_ptr to the main branch (branch_id 0). Main is never
     // deleted, so this pointer stays valid for Daemon's entire lifetime and
     // working_tree() / checkpoint_mutex() below are safe to return references

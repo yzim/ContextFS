@@ -1,8 +1,10 @@
 #pragma once
 #include <cstdint>
+#include <functional>
 #include <mutex>
 #include <string>
 #include <unordered_map>
+#include <vector>
 
 namespace cas {
 
@@ -14,6 +16,15 @@ using Pid = int32_t;
 
 class BranchRouter {
 public:
+    struct Hooks {
+        std::function<uint64_t(const std::string&)> cgroup_id;
+        std::function<std::string(Pid)> read_cgroup;
+        std::function<uint64_t(Pid)> read_starttime;
+    };
+
+    BranchRouter();
+    explicit BranchRouter(Hooks hooks);
+
     // Returns true if cgroup_path resolves to a valid cgroup v2 directory
     // and the mapping was recorded; false otherwise (nonexistent path,
     // stat failure, not a directory). A false return should be surfaced
@@ -47,9 +58,17 @@ private:
         uint64_t starttime;  // process start time; 0 means not-validated
     };
 
+    uint64_t cgroup_id(const std::string& path) const;
+    std::string proc_cgroup(Pid pid) const;
+    uint64_t proc_starttime(Pid pid) const;
+    std::vector<uint64_t> cgroup_path_ids(const std::string& cgroup_abs_path) const;
+    uint32_t branch_for_cgroup_ids(const std::vector<uint64_t>& ids) const;
+
     mutable std::mutex mu_;
     std::unordered_map<uint64_t, uint32_t> cgroup_branch_map_;
     std::unordered_map<Pid, CachedMapping> pid_cache_;
+    uint64_t generation_ = 0;
+    Hooks hooks_;
 };
 
 } // namespace cas

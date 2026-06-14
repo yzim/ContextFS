@@ -8,7 +8,9 @@ namespace cas {
 
 namespace fs = std::filesystem;
 
-static bool is_store_dir(const std::string& name) { return name == ".agentvfs-store"; }
+static bool is_reserved_root_name(const std::string& name) {
+    return name == ".agentvfs-store" || name == ".agentvfs-control";
+}
 
 static std::string source_abs(const std::string& root, const std::string& vpath) {
     return (vpath == "/") ? root : root + vpath;
@@ -100,7 +102,7 @@ bool Bootstrap::ensure_path(const std::string& vpath) {
         if (ec) return false;
         auto last_slash = it->rfind('/');
         std::string base = (last_slash == std::string::npos) ? *it : it->substr(last_slash + 1);
-        if (is_store_dir(base)) return false;
+        if (is_reserved_root_name(base)) return false;
         ingest_entry(*it, src);
     }
     return true;
@@ -131,7 +133,7 @@ void Bootstrap::walk_bg() {
         {
             const auto& entry = *it;
             std::string name = entry.path().filename().string();
-            if (vpath == "/" && is_store_dir(name)) continue;
+            if (vpath == "/" && is_reserved_root_name(name)) continue;
             std::string child_v = (vpath == "/") ? ("/" + name) : (vpath + "/" + name);
             auto existing = wt_.lookup_raw(child_v);
             if (existing.has_value()) {

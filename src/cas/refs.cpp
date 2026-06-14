@@ -133,8 +133,39 @@ bool Refs::write_ref(const std::string& branch, const Hash& commit_hash,
 bool Refs::remove_ref(const std::string& branch) {
     if (branch == "main") return false;
     std::string path = refs_dir_ + "/" + branch;
+#ifndef _WIN32
+    int dir_fd = open(refs_dir_.c_str(), O_RDONLY | O_DIRECTORY);
+    if (dir_fd < 0) {
+        std::fprintf(stderr, "agentvfs: refs: open refs dir '%s': %s\n",
+                     refs_dir_.c_str(), std::strerror(errno));
+        return false;
+    }
+    if (unlink(path.c_str()) != 0) {
+        int saved = errno;
+        close(dir_fd);
+        std::fprintf(stderr, "agentvfs: refs: unlink('%s'): %s\n",
+                     path.c_str(), std::strerror(saved));
+        errno = saved;
+        return false;
+    }
+    if (fsync(dir_fd) != 0) {
+        int saved = errno;
+        close(dir_fd);
+        std::fprintf(stderr, "agentvfs: refs: fsync refs dir '%s': %s\n",
+                     refs_dir_.c_str(), std::strerror(saved));
+        errno = saved;
+        return false;
+    }
+    if (close(dir_fd) != 0) {
+        std::fprintf(stderr, "agentvfs: refs: close refs dir '%s': %s\n",
+                     refs_dir_.c_str(), std::strerror(errno));
+        return false;
+    }
+    return true;
+#else
     std::error_code ec;
     return fs::remove(path, ec) && !ec;
+#endif
 }
 
 } // namespace cas

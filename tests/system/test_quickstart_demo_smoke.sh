@@ -10,6 +10,7 @@ set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 SCRIPT="$REPO_ROOT/demo/agentvfs-quickstart.sh"
+export PATH="$REPO_ROOT/build:$PATH"
 
 if [[ ! -x "$SCRIPT" ]]; then
     echo "FAIL: $SCRIPT not found or not executable" >&2

@@ -8,6 +8,7 @@ BIN="${BIN:-$REPO/build/agentvfs}"
 WORK="$(mktemp -d)"
 export HOME="$WORK/home"
 export XDG_RUNTIME_DIR="$WORK/xdg"
+export PATH="$REPO/build:$PATH"
 mkdir -p "$HOME" "$XDG_RUNTIME_DIR"
 
 cleanup() {

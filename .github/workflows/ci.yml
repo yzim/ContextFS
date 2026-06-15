@@ -109,7 +109,7 @@ jobs:
             fuse3 \
             netcat-openbsd \
             clang \
-            bpftool \
+            linux-tools-common \
             libbpf-dev \
             libelf-dev \
             zlib1g-dev \

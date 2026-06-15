@@ -111,6 +111,11 @@ jobs:
         run: |
           run_system_test() {
             echo "==> $1"
+            bash "$1"
+          }
+
+          run_root_system_test() {
+            echo "==> $1 (root)"
             sudo -E env "PATH=$PATH" bash "$1"
           }
 
@@ -119,19 +124,19 @@ jobs:
           run_system_test tests/system/test_cas_smoke.sh
           run_system_test tests/system/test_cas_bootstrap.sh
           run_system_test tests/system/test_cas_fh_lifecycle.sh
-          run_system_test tests/system/test_cas_branching.sh
-          run_system_test tests/system/test_cas_branch_merge.sh
-          run_system_test tests/system/test_cas_multi_branch.sh
-          run_system_test tests/system/test_cas_multi_branch_merge.sh
-          run_system_test tests/system/test_workspace_multi_branch.sh
+          run_root_system_test tests/system/test_cas_branching.sh
+          run_root_system_test tests/system/test_cas_branch_merge.sh
+          run_root_system_test tests/system/test_cas_multi_branch.sh
+          run_root_system_test tests/system/test_cas_multi_branch_merge.sh
+          run_root_system_test tests/system/test_workspace_multi_branch.sh
           run_system_test tests/system/test_cas_10cp_rollback.sh
-          run_system_test tests/system/test_cas_10cp_ebpf.sh
-          run_system_test tests/system/test_cas_telemetry.sh
+          run_root_system_test tests/system/test_cas_10cp_ebpf.sh
+          run_root_system_test tests/system/test_cas_telemetry.sh
           run_system_test tests/system/test_cas_telemetry_ramp.sh
           run_system_test tests/system/test_cas_backend_compare.sh
           run_system_test tests/system/test_cas_multi_backend.sh
-          run_system_test tests/system/test_cas_multi_branch_ebpf.sh
-          run_system_test tests/system/test_cas_fanotify.sh
+          run_root_system_test tests/system/test_cas_multi_branch_ebpf.sh
+          run_root_system_test tests/system/test_cas_fanotify.sh
           run_system_test tests/system/test_cas_ptrace.sh
           run_system_test tests/system/test_cas_ldpreload.sh
           run_system_test tests/system/test_cas_bpftime.sh

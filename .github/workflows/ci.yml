@@ -7,7 +7,7 @@ on:
     branches: [main]
 
 jobs:
-  linux:
+  linux-unit-tests:
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -16,7 +16,7 @@ jobs:
       - name: Install dependencies
         run: sudo apt-get update && sudo apt-get install -y libfuse3-dev fuse3
       - name: Configure
-        run: cmake -B build -DAGENTVFS_EBPF=OFF
+        run: cmake -B build -DAGENTVFS_EBPF=OFF -DAGENTVFS_LDPRELOAD=ON
       - name: Build
         run: cmake --build build -j
       - name: Unit tests
@@ -27,14 +27,22 @@ jobs:
           ./build/cas_test_branch_context
           ./build/cas_test_branch_merge
           ./build/cas_test_branch_merge_commit
-          ./build/cas_test_fh_lifecycle /tmp /tmp/test.sock || true
           ./build/cas_test_branch_merge_daemon || true
           ./build/cas_test_branch_persistence || true
           ./build/cas_test_blake3_simd
           ./build/cas_test_telemetry_event
           ./build/cas_test_telemetry_registry
+          ./build/cas_test_workspace_cli
+          ./build/cas_test_ebpf_backend
+          ./build/cas_test_fanotify_backend
+          ./build/cas_test_ptrace_backend
+          ./build/cas_test_ldpreload_backend
+          ./build/cas_test_bpftime_backend
+          ./build/cas_test_wasm_backend
+          ./build/cas_test_lua_backend
+          ./build/cas_test_ldpreload_preload
 
-  macos:
+  macos-unit-tests:
     runs-on: macos-latest
     strategy:
       fail-fast: false
@@ -42,14 +50,11 @@ jobs:
       - uses: actions/checkout@v4
       - name: Configure
         # AGENTVFS_FUSE_T defaults to ON on Apple; disable it here so this
-        # portable-only job doesn't require fuse-t (covered by macos-daemon).
+        # unit-only job doesn't require fuse-t.
         run: cmake -B build -DAGENTVFS_EBPF=OFF -DAGENTVFS_FUSE_T=OFF
       - name: Build
         run: cmake --build build -j
       - name: Unit tests
-        # macOS is UNIX, so every UNIX-gated test still builds and runs.
-        # The daemon target is Linux-only and is intentionally not built
-        # here.
         run: |
           ./build/cas_test_working_tree
           ./build/cas_test_write_buffer
@@ -60,24 +65,19 @@ jobs:
           ./build/cas_test_blake3_simd
           ./build/cas_test_telemetry_event
           ./build/cas_test_telemetry_registry
+          ./build/cas_test_workspace_cli
+          ./build/cas_test_fuse_t_preflight
 
-  windows:
+  windows-unit-tests:
     runs-on: windows-latest
     strategy:
       fail-fast: false
     steps:
       - uses: actions/checkout@v4
       - name: Configure
-        # AGENTVFS_WINFSP defaults to ON on Windows; explicitly disable it
-        # so this portable-only job doesn't require the WinFsp SDK.
+        # Build only unit targets here; WinFsp is reserved for system tests.
         run: cmake -B build -DAGENTVFS_EBPF=OFF -DAGENTVFS_WINFSP=OFF
       - name: Build
-        # Windows builds only the portable tests gated by the CMake
-        # if(UNIX)/if(LINUX) guards. The fh_lifecycle / object_store /
-        # branch_merge_commit / telemetry_registry / branch_persistence /
-        # branch_merge_daemon harnesses use POSIX-only APIs and are not
-        # available here. cas_core itself compiles via std::filesystem
-        # and the posix_compat.h shim.
         run: cmake --build build --config Release -j
       - name: Unit tests
         run: |
@@ -87,8 +87,50 @@ jobs:
           .\build\Release\cas_test_branch_merge.exe
           .\build\Release\cas_test_blake3_simd.exe
           .\build\Release\cas_test_telemetry_event.exe
+          .\build\Release\cas_test_win_helpers.exe
+          .\build\Release\cas_test_named_pipe_channel.exe
 
-  windows-daemon:
+  linux-system-tests:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install dependencies
+        run: sudo apt-get update && sudo apt-get install -y libfuse3-dev fuse3 netcat-openbsd
+      - name: Configure
+        run: cmake -B build -DAGENTVFS_EBPF=OFF -DAGENTVFS_FANOTIFY=ON -DAGENTVFS_PTRACE=ON -DAGENTVFS_LDPRELOAD=ON -DAGENTVFS_BPFTIME=ON -DAGENTVFS_WASM=ON -DAGENTVFS_LUA=ON
+      - name: Build
+        run: cmake --build build -j
+      - name: System tests
+        run: |
+          bash tests/system/test_agentvfs_ctl.sh
+          bash tests/system/test_workspace_cli.sh
+          bash tests/system/test_cas_smoke.sh
+          bash tests/system/test_cas_bootstrap.sh
+          bash tests/system/test_cas_fh_lifecycle.sh
+          bash tests/system/test_cas_branching.sh
+          bash tests/system/test_cas_branch_merge.sh
+          bash tests/system/test_cas_multi_branch.sh
+          bash tests/system/test_cas_multi_branch_merge.sh
+          bash tests/system/test_workspace_multi_branch.sh
+          bash tests/system/test_cas_10cp_rollback.sh
+          bash tests/system/test_cas_10cp_ebpf.sh
+          bash tests/system/test_cas_telemetry.sh
+          bash tests/system/test_cas_telemetry_ramp.sh
+          bash tests/system/test_cas_backend_compare.sh
+          bash tests/system/test_cas_multi_backend.sh
+          bash tests/system/test_cas_multi_branch_ebpf.sh
+          bash tests/system/test_cas_fanotify.sh
+          bash tests/system/test_cas_ptrace.sh
+          bash tests/system/test_cas_ldpreload.sh
+          bash tests/system/test_cas_bpftime.sh
+          bash tests/system/test_cas_lua.sh
+          bash tests/system/test_cas_wasm.sh
+          bash tests/system/test_start_sh.sh
+          bash tests/system/test_quickstart_demo_smoke.sh
+
+  windows-system-tests:
     runs-on: windows-latest
     strategy: { fail-fast: false }
     steps:
@@ -114,15 +156,11 @@ jobs:
         run: cmake -B build -DAGENTVFS_EBPF=OFF -DAGENTVFS_WINFSP=ON
       - name: Build
         run: cmake --build build --config Release -j
-      - name: Windows unit tests
-        run: |
-          .\build\Release\cas_test_win_helpers.exe
-          .\build\Release\cas_test_named_pipe_channel.exe
-      - name: E2E test
+      - name: System tests
         shell: powershell
-        run: ./tests/cas/windows/test_winfsp_e2e.ps1
+        run: ./tests/system/windows/test_winfsp_e2e.ps1
 
-  macos-daemon:
+  macos-system-tests:
     runs-on: macos-latest
     strategy: { fail-fast: false }
     steps:
@@ -133,7 +171,5 @@ jobs:
         run: cmake -B build -DAGENTVFS_EBPF=OFF -DAGENTVFS_FUSE_T=ON
       - name: Build
         run: cmake --build build -j
-      - name: Preflight unit test
-        run: ./build/cas_test_fuse_t_preflight
-      - name: E2E test
-        run: bash tests/cas/test_macos_e2e.sh
+      - name: System tests
+        run: bash tests/system/test_macos_e2e.sh

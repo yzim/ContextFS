@@ -90,6 +90,23 @@ endif()
 option(AGENTVFS_WINFSP "Build the Windows daemon (requires WinFsp 2.0+ SDK)"
        ${WIN32})
 
+if(WIN32)
+    add_executable(cas_test_named_pipe_channel
+        tests/unit/test_named_pipe_channel.cpp
+        src/cas/platform/windows/named_pipe_channel.cpp)
+    target_include_directories(cas_test_named_pipe_channel PRIVATE
+        src src/cas)
+    target_compile_features(cas_test_named_pipe_channel PRIVATE cxx_std_17)
+
+    add_executable(cas_test_win_helpers
+        tests/unit/test_win_helpers.cpp
+        src/cas/platform/windows/path_translation.cpp
+        src/cas/platform/windows/ntstatus_map.cpp)
+    target_include_directories(cas_test_win_helpers PRIVATE
+        src src/cas)
+    target_compile_features(cas_test_win_helpers PRIVATE cxx_std_17)
+endif()
+
 if(WIN32 AND AGENTVFS_WINFSP)
     find_path(WINFSP_INCLUDE_DIR NAMES winfsp/winfsp.h
         PATHS "$ENV{ProgramFiles}/WinFsp/inc"
@@ -106,21 +123,6 @@ if(WIN32 AND AGENTVFS_WINFSP)
             "AGENTVFS_WINFSP=ON but WinFsp SDK not found. "
             "Install WinFsp 2.0+ from https://winfsp.dev.")
     endif()
-
-    add_executable(cas_test_named_pipe_channel
-        tests/cas/test_named_pipe_channel.cpp
-        src/cas/platform/windows/named_pipe_channel.cpp)
-    target_include_directories(cas_test_named_pipe_channel PRIVATE
-        src src/cas)
-    target_compile_features(cas_test_named_pipe_channel PRIVATE cxx_std_17)
-
-    add_executable(cas_test_win_helpers
-        tests/cas/test_win_helpers.cpp
-        src/cas/platform/windows/path_translation.cpp
-        src/cas/platform/windows/ntstatus_map.cpp)
-    target_include_directories(cas_test_win_helpers PRIVATE
-        src src/cas ${WINFSP_INCLUDE_DIR})
-    target_compile_features(cas_test_win_helpers PRIVATE cxx_std_17)
 endif()
 
 # ── cas_core static library (always built) ─────────────────────────
@@ -480,7 +482,7 @@ add_custom_target(uninstall
 
 if(UNIX)
 add_executable(cas_test_workspace_cli
-    tests/cas/test_workspace_cli.cpp
+    tests/unit/test_workspace_cli.cpp
     src/cas/workspace_cli.cpp)
 target_include_directories(cas_test_workspace_cli PRIVATE src/cas)
 if(NOT MSVC)
@@ -497,7 +499,7 @@ endif() # UNIX
 
 if(APPLE)
 add_executable(cas_test_fuse_t_preflight
-    tests/cas/test_fuse_t_preflight.cpp
+    tests/unit/test_fuse_t_preflight.cpp
     src/cas/platform/macos/fuse_t_preflight.cpp)
 target_include_directories(cas_test_fuse_t_preflight PRIVATE
     src src/cas include)
@@ -509,16 +511,16 @@ endif()
 endif()
 
 # ── CAS unit tests ──────────────────────────────────────────────────
-add_executable(cas_test_working_tree tests/cas/test_working_tree.cpp)
+add_executable(cas_test_working_tree tests/unit/test_working_tree.cpp)
 target_link_libraries(cas_test_working_tree PRIVATE cas_core)
 
-add_executable(cas_test_write_buffer tests/cas/test_write_buffer.cpp)
+add_executable(cas_test_write_buffer tests/unit/test_write_buffer.cpp)
 target_link_libraries(cas_test_write_buffer PRIVATE cas_core)
 
 # Uses POSIX <dirent.h>/mkdtemp/lstat in its harness; gate to UNIX. The
 # cas_core APIs it exercises are themselves portable.
 if(UNIX)
-add_executable(cas_test_object_store tests/cas/test_object_store.cpp)
+add_executable(cas_test_object_store tests/unit/test_object_store.cpp)
 target_link_libraries(cas_test_object_store PRIVATE cas_core)
 endif()
 
@@ -527,24 +529,24 @@ endif()
 # daemon — it cannot meaningfully run on Windows even after cas_core
 # itself compiles there.
 if(UNIX)
-add_executable(cas_test_fh_lifecycle tests/cas/test_cas_fh_lifecycle.cpp)
+add_executable(cas_test_fh_lifecycle tests/system/test_cas_fh_lifecycle.cpp)
 endif()
 
-add_executable(cas_test_branch_context tests/cas/test_branch_context.cpp)
+add_executable(cas_test_branch_context tests/unit/test_branch_context.cpp)
 target_link_libraries(cas_test_branch_context PRIVATE cas_core)
 
-add_executable(cas_test_branch_merge tests/cas/test_branch_merge.cpp)
+add_executable(cas_test_branch_merge tests/unit/test_branch_merge.cpp)
 target_link_libraries(cas_test_branch_merge PRIVATE cas_core)
 
 # Same as cas_test_object_store: harness uses POSIX directory APIs.
 if(UNIX)
-add_executable(cas_test_branch_merge_commit tests/cas/test_branch_merge_commit.cpp)
+add_executable(cas_test_branch_merge_commit tests/unit/test_branch_merge_commit.cpp)
 target_link_libraries(cas_test_branch_merge_commit PRIVATE cas_core)
 endif()
 
 if(UNIX)
 add_executable(cas_test_branch_merge_daemon
-    tests/cas/test_branch_merge_daemon.cpp
+    tests/unit/test_branch_merge_daemon.cpp
     tests/cas/ebpf_loader_stub.cpp)
 target_link_libraries(cas_test_branch_merge_daemon PRIVATE cas_core)
 if(AGENTVFS_EBPF)
@@ -552,7 +554,7 @@ if(AGENTVFS_EBPF)
 endif()
 
 add_executable(cas_test_branch_persistence
-    tests/cas/test_branch_persistence.cpp
+    tests/unit/test_branch_persistence.cpp
     tests/cas/ebpf_loader_stub.cpp)
 target_link_libraries(cas_test_branch_persistence PRIVATE cas_core)
 if(AGENTVFS_EBPF)
@@ -560,25 +562,25 @@ if(AGENTVFS_EBPF)
 endif()
 endif() # UNIX
 
-add_executable(cas_test_telemetry_event tests/cas/test_telemetry_event.cpp src/cas/telemetry_event.cpp)
+add_executable(cas_test_telemetry_event tests/unit/test_telemetry_event.cpp src/cas/telemetry_event.cpp)
 target_include_directories(cas_test_telemetry_event PRIVATE include src src/cas)
 target_compile_features(cas_test_telemetry_event PRIVATE cxx_std_17)
 
 # Uses fork()/waitpid() in the harness; gate to UNIX.
 if(UNIX)
-add_executable(cas_test_telemetry_registry tests/cas/test_telemetry_registry.cpp src/cas/telemetry_registry.cpp src/cas/telemetry_event.cpp)
+add_executable(cas_test_telemetry_registry tests/unit/test_telemetry_registry.cpp src/cas/telemetry_registry.cpp src/cas/telemetry_event.cpp)
 target_include_directories(cas_test_telemetry_registry PRIVATE include src src/cas)
 target_compile_features(cas_test_telemetry_registry PRIVATE cxx_std_17)
 endif()
 
 if(AGENTVFS_BLAKE3_SIMD)
-add_executable(cas_test_blake3_simd tests/cas/test_blake3_simd.cpp)
+add_executable(cas_test_blake3_simd tests/unit/test_blake3_simd.cpp)
 target_link_libraries(cas_test_blake3_simd PRIVATE cas_core)
 endif()
 
 if(LINUX)
 add_executable(cas_test_ebpf_backend
-    tests/cas/test_ebpf_backend.cpp
+    tests/unit/test_ebpf_backend.cpp
     src/cas/backends/ebpf_backend.cpp
     src/cas/ebpf_loader.cpp)
 target_include_directories(cas_test_ebpf_backend PRIVATE include src src/cas)
@@ -592,7 +594,7 @@ if(AGENTVFS_EBPF)
 endif()
 
 add_executable(cas_test_fanotify_backend
-    tests/cas/test_fanotify_backend.cpp
+    tests/unit/test_fanotify_backend.cpp
     src/cas/backends/fanotify_backend.cpp
     src/cas/telemetry_event.cpp)
 target_include_directories(cas_test_fanotify_backend PRIVATE include src src/cas)
@@ -603,7 +605,7 @@ if(AGENTVFS_FANOTIFY)
 endif()
 
 add_executable(cas_test_ptrace_backend
-    tests/cas/test_ptrace_backend.cpp
+    tests/unit/test_ptrace_backend.cpp
     src/cas/backends/ptrace_backend.cpp
     src/cas/telemetry_event.cpp)
 target_include_directories(cas_test_ptrace_backend PRIVATE include src src/cas)
@@ -614,7 +616,7 @@ if(AGENTVFS_PTRACE)
 endif()
 
 add_executable(cas_test_ldpreload_backend
-    tests/cas/test_ldpreload_backend.cpp
+    tests/unit/test_ldpreload_backend.cpp
     src/cas/backends/ldpreload_backend.cpp
     src/cas/telemetry_event.cpp)
 target_include_directories(cas_test_ldpreload_backend PRIVATE include src src/cas)
@@ -625,7 +627,7 @@ if(AGENTVFS_LDPRELOAD)
 endif()
 
 add_executable(cas_test_bpftime_backend
-    tests/cas/test_bpftime_backend.cpp
+    tests/unit/test_bpftime_backend.cpp
     src/cas/backends/bpftime_backend.cpp)
 target_include_directories(cas_test_bpftime_backend PRIVATE include src src/cas)
 target_link_libraries(cas_test_bpftime_backend PRIVATE Threads::Threads)
@@ -635,7 +637,7 @@ if(AGENTVFS_BPFTIME)
 endif()
 
 add_executable(cas_test_wasm_backend
-    tests/cas/test_wasm_backend.cpp
+    tests/unit/test_wasm_backend.cpp
     src/cas/backends/wasm_backend.cpp)
 target_include_directories(cas_test_wasm_backend PRIVATE include src src/cas)
 target_compile_features(cas_test_wasm_backend PRIVATE cxx_std_17)
@@ -644,7 +646,7 @@ if(AGENTVFS_WASM)
 endif()
 
 add_executable(cas_test_lua_backend
-    tests/cas/test_lua_backend.cpp
+    tests/unit/test_lua_backend.cpp
     src/cas/backends/lua_backend.cpp)
 target_include_directories(cas_test_lua_backend PRIVATE include src src/cas)
 target_compile_features(cas_test_lua_backend PRIVATE cxx_std_17)
@@ -654,7 +656,7 @@ endif()
 
 if(AGENTVFS_LDPRELOAD)
     add_executable(cas_test_ldpreload_preload
-        tests/cas/test_ldpreload_preload.cpp)
+        tests/unit/test_ldpreload_preload.cpp)
     target_include_directories(cas_test_ldpreload_preload PRIVATE include src src/cas)
     target_link_libraries(cas_test_ldpreload_preload PRIVATE dl Threads::Threads)
     target_compile_features(cas_test_ldpreload_preload PRIVATE cxx_std_17)

@@ -12,8 +12,8 @@
 # pipeline-failure protection while letting `pass`/`fail` count outcomes freely.
 set -uo pipefail
 
-BIN="${BIN:-$(pwd)/build-all/agentvfs}"
-PRELOAD_LIB="${PRELOAD_LIB:-$(pwd)/build-all/libcas_preload.so}"
+BIN="${BIN:-$(pwd)/build/agentvfs}"
+PRELOAD_LIB="${PRELOAD_LIB:-$(pwd)/build/libcas_preload.so}"
 ROOT="${ROOT:-/tmp/agentvfs-ramp}"
 RAMP_LIMIT="${RAMP_LIMIT:-7}"   # stop after iteration N (dev/CI smoke)
 RAMP_NEGATIVE="${RAMP_NEGATIVE:-0}"

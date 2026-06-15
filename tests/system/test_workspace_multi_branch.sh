@@ -1,6 +1,6 @@
 #!/bin/bash
 # 5 branches x 5 checkpoints + rollback + merge through `agentvfs workspace`.
-# Run: sudo bash workspace_test.sh
+# Run: bash tests/system/test_workspace_multi_branch.sh
 set -euo pipefail
 
 BIN_DIR="${BIN_DIR:-$(pwd)/build}"
@@ -10,7 +10,10 @@ ROOT="${ROOT:-/tmp/agentvfs-ws-test}"
 NAME="cas-test"
 CG_BASE="/sys/fs/cgroup/agentvfs-ws-test-$$"
 
-[[ $EUID -eq 0 ]] || { echo "re-run with sudo: sudo bash $0"; exit 1; }
+if [[ $EUID -ne 0 ]]; then
+    echo "SKIP test_workspace_multi_branch: needs root for cgroup creation"
+    exit 0
+fi
 [[ -x "$AGENTVFS" ]] || { echo "missing $AGENTVFS — build first: cmake -B build && cmake --build build -j"; exit 1; }
 [[ -x "$CTL"      ]] || { echo "missing $CTL"; exit 1; }
 

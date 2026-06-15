@@ -14,7 +14,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Install dependencies
-        run: sudo apt-get update && sudo apt-get install -y libfuse3-dev fuse3
+        run: sudo apt-get update && sudo apt-get install -y libfuse3-dev fuse3 libelf-dev zlib1g-dev
       - name: Configure
         run: cmake -B build -DAGENTVFS_EBPF=OFF -DAGENTVFS_LDPRELOAD=ON
       - name: Build
@@ -102,9 +102,22 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Install dependencies
-        run: sudo apt-get update && sudo apt-get install -y libfuse3-dev fuse3 netcat-openbsd
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libfuse3-dev \
+            fuse3 \
+            netcat-openbsd \
+            clang \
+            bpftool \
+            libbpf-dev \
+            libelf-dev \
+            zlib1g-dev \
+            liblua5.4-dev \
+            lua5.4 \
+            wabt
       - name: Configure
-        run: cmake -B build -DAGENTVFS_EBPF=OFF -DAGENTVFS_FANOTIFY=ON -DAGENTVFS_PTRACE=ON -DAGENTVFS_LDPRELOAD=ON -DAGENTVFS_BPFTIME=ON -DAGENTVFS_WASM=ON -DAGENTVFS_LUA=ON
+        run: cmake -B build -DAGENTVFS_EBPF=ON -DAGENTVFS_FANOTIFY=ON -DAGENTVFS_PTRACE=ON -DAGENTVFS_LDPRELOAD=ON -DAGENTVFS_BPFTIME=ON -DAGENTVFS_WASM=ON -DAGENTVFS_LUA=ON
       - name: Build
         run: cmake --build build -j
       - name: System tests
@@ -119,6 +132,8 @@ jobs:
             sudo -E env "PATH=$PATH" bash "$1"
           }
 
+          sudo sysctl -w kernel.yama.ptrace_scope=0
+
           run_system_test tests/system/test_agentvfs_ctl.sh
           run_system_test tests/system/test_workspace_cli.sh
           run_system_test tests/system/test_cas_smoke.sh
@@ -132,12 +147,12 @@ jobs:
           run_system_test tests/system/test_cas_10cp_rollback.sh
           run_root_system_test tests/system/test_cas_10cp_ebpf.sh
           run_root_system_test tests/system/test_cas_telemetry.sh
-          run_system_test tests/system/test_cas_telemetry_ramp.sh
-          run_system_test tests/system/test_cas_backend_compare.sh
-          run_system_test tests/system/test_cas_multi_backend.sh
+          run_root_system_test tests/system/test_cas_telemetry_ramp.sh
+          run_root_system_test tests/system/test_cas_backend_compare.sh
+          run_root_system_test tests/system/test_cas_multi_backend.sh
           run_root_system_test tests/system/test_cas_multi_branch_ebpf.sh
           run_root_system_test tests/system/test_cas_fanotify.sh
-          run_system_test tests/system/test_cas_ptrace.sh
+          run_root_system_test tests/system/test_cas_ptrace.sh
           run_system_test tests/system/test_cas_ldpreload.sh
           run_system_test tests/system/test_cas_bpftime.sh
           run_system_test tests/system/test_cas_lua.sh

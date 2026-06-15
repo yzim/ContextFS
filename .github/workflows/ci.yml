@@ -32,8 +32,8 @@ jobs:
           run_test ./build/tests/cas_test_branch_context
           run_test ./build/tests/cas_test_branch_merge
           run_test ./build/tests/cas_test_branch_merge_commit
-          run_test ./build/tests/cas_test_branch_merge_daemon || true
-          run_test ./build/tests/cas_test_branch_persistence || true
+          run_test ./build/tests/cas_test_branch_merge_daemon
+          run_test ./build/tests/cas_test_branch_persistence
           run_test ./build/tests/cas_test_blake3_simd
           run_test ./build/tests/cas_test_telemetry_event
           run_test ./build/tests/cas_test_telemetry_registry
@@ -109,31 +109,36 @@ jobs:
         run: cmake --build build -j
       - name: System tests
         run: |
-          bash tests/system/test_agentvfs_ctl.sh
-          bash tests/system/test_workspace_cli.sh
-          bash tests/system/test_cas_smoke.sh
-          bash tests/system/test_cas_bootstrap.sh
-          bash tests/system/test_cas_fh_lifecycle.sh
-          bash tests/system/test_cas_branching.sh
-          bash tests/system/test_cas_branch_merge.sh
-          bash tests/system/test_cas_multi_branch.sh
-          bash tests/system/test_cas_multi_branch_merge.sh
-          bash tests/system/test_workspace_multi_branch.sh
-          bash tests/system/test_cas_10cp_rollback.sh
-          bash tests/system/test_cas_10cp_ebpf.sh
-          bash tests/system/test_cas_telemetry.sh
-          bash tests/system/test_cas_telemetry_ramp.sh
-          bash tests/system/test_cas_backend_compare.sh
-          bash tests/system/test_cas_multi_backend.sh
-          bash tests/system/test_cas_multi_branch_ebpf.sh
-          bash tests/system/test_cas_fanotify.sh
-          bash tests/system/test_cas_ptrace.sh
-          bash tests/system/test_cas_ldpreload.sh
-          bash tests/system/test_cas_bpftime.sh
-          bash tests/system/test_cas_lua.sh
-          bash tests/system/test_cas_wasm.sh
-          bash tests/system/test_start_sh.sh
-          bash tests/system/test_quickstart_demo_smoke.sh
+          run_system_test() {
+            echo "==> $1"
+            sudo -E env "PATH=$PATH" bash "$1"
+          }
+
+          run_system_test tests/system/test_agentvfs_ctl.sh
+          run_system_test tests/system/test_workspace_cli.sh
+          run_system_test tests/system/test_cas_smoke.sh
+          run_system_test tests/system/test_cas_bootstrap.sh
+          run_system_test tests/system/test_cas_fh_lifecycle.sh
+          run_system_test tests/system/test_cas_branching.sh
+          run_system_test tests/system/test_cas_branch_merge.sh
+          run_system_test tests/system/test_cas_multi_branch.sh
+          run_system_test tests/system/test_cas_multi_branch_merge.sh
+          run_system_test tests/system/test_workspace_multi_branch.sh
+          run_system_test tests/system/test_cas_10cp_rollback.sh
+          run_system_test tests/system/test_cas_10cp_ebpf.sh
+          run_system_test tests/system/test_cas_telemetry.sh
+          run_system_test tests/system/test_cas_telemetry_ramp.sh
+          run_system_test tests/system/test_cas_backend_compare.sh
+          run_system_test tests/system/test_cas_multi_backend.sh
+          run_system_test tests/system/test_cas_multi_branch_ebpf.sh
+          run_system_test tests/system/test_cas_fanotify.sh
+          run_system_test tests/system/test_cas_ptrace.sh
+          run_system_test tests/system/test_cas_ldpreload.sh
+          run_system_test tests/system/test_cas_bpftime.sh
+          run_system_test tests/system/test_cas_lua.sh
+          run_system_test tests/system/test_cas_wasm.sh
+          run_system_test tests/system/test_start_sh.sh
+          run_system_test tests/system/test_quickstart_demo_smoke.sh
 
   windows-system-tests:
     runs-on: windows-latest

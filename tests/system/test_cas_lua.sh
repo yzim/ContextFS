@@ -2,7 +2,7 @@
 set -euo pipefail
 
 BIN="${BIN:-$(pwd)/build/agentvfs}"
-FIXTURE="$(pwd)/tests/cas/fixtures/test_policy.lua"
+FIXTURE="$(pwd)/tests/fixtures/test_policy.lua"
 
 if [[ ! -x "$BIN" ]]; then
     echo "SKIP test_cas_lua: $BIN is not built"

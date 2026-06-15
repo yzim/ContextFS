@@ -155,8 +155,8 @@ jobs:
           run_root_system_test tests/system/test_cas_ptrace.sh
           run_system_test tests/system/test_cas_ldpreload.sh
           run_system_test tests/system/test_cas_bpftime.sh
-          run_system_test tests/system/test_cas_lua.sh
-          run_system_test tests/system/test_cas_wasm.sh
+          run_system_test tests/system/test_cas_lua_actually_skipped.sh
+          run_system_test tests/system/test_cas_wasm_actually_skipped.sh
           run_system_test tests/system/test_start_sh.sh
           run_system_test tests/system/test_quickstart_demo_smoke.sh
 

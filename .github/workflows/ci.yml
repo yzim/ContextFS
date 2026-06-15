@@ -21,26 +21,26 @@ jobs:
         run: cmake --build build -j
       - name: Unit tests
         run: |
-          ./build/cas_test_working_tree
-          ./build/cas_test_write_buffer
-          ./build/cas_test_object_store
-          ./build/cas_test_branch_context
-          ./build/cas_test_branch_merge
-          ./build/cas_test_branch_merge_commit
-          ./build/cas_test_branch_merge_daemon || true
-          ./build/cas_test_branch_persistence || true
-          ./build/cas_test_blake3_simd
-          ./build/cas_test_telemetry_event
-          ./build/cas_test_telemetry_registry
-          ./build/cas_test_workspace_cli
-          ./build/cas_test_ebpf_backend
-          ./build/cas_test_fanotify_backend
-          ./build/cas_test_ptrace_backend
-          ./build/cas_test_ldpreload_backend
-          ./build/cas_test_bpftime_backend
-          ./build/cas_test_wasm_backend
-          ./build/cas_test_lua_backend
-          ./build/cas_test_ldpreload_preload
+          ./build/tests/cas_test_working_tree
+          ./build/tests/cas_test_write_buffer
+          ./build/tests/cas_test_object_store
+          ./build/tests/cas_test_branch_context
+          ./build/tests/cas_test_branch_merge
+          ./build/tests/cas_test_branch_merge_commit
+          ./build/tests/cas_test_branch_merge_daemon || true
+          ./build/tests/cas_test_branch_persistence || true
+          ./build/tests/cas_test_blake3_simd
+          ./build/tests/cas_test_telemetry_event
+          ./build/tests/cas_test_telemetry_registry
+          ./build/tests/cas_test_workspace_cli
+          ./build/tests/cas_test_ebpf_backend
+          ./build/tests/cas_test_fanotify_backend
+          ./build/tests/cas_test_ptrace_backend
+          ./build/tests/cas_test_ldpreload_backend
+          ./build/tests/cas_test_bpftime_backend
+          ./build/tests/cas_test_wasm_backend
+          ./build/tests/cas_test_lua_backend
+          ./build/tests/cas_test_ldpreload_preload
 
   macos-unit-tests:
     runs-on: macos-latest
@@ -56,17 +56,17 @@ jobs:
         run: cmake --build build -j
       - name: Unit tests
         run: |
-          ./build/cas_test_working_tree
-          ./build/cas_test_write_buffer
-          ./build/cas_test_object_store
-          ./build/cas_test_branch_context
-          ./build/cas_test_branch_merge
-          ./build/cas_test_branch_merge_commit
-          ./build/cas_test_blake3_simd
-          ./build/cas_test_telemetry_event
-          ./build/cas_test_telemetry_registry
-          ./build/cas_test_workspace_cli
-          ./build/cas_test_fuse_t_preflight
+          ./build/tests/cas_test_working_tree
+          ./build/tests/cas_test_write_buffer
+          ./build/tests/cas_test_object_store
+          ./build/tests/cas_test_branch_context
+          ./build/tests/cas_test_branch_merge
+          ./build/tests/cas_test_branch_merge_commit
+          ./build/tests/cas_test_blake3_simd
+          ./build/tests/cas_test_telemetry_event
+          ./build/tests/cas_test_telemetry_registry
+          ./build/tests/cas_test_workspace_cli
+          ./build/tests/cas_test_fuse_t_preflight
 
   windows-unit-tests:
     runs-on: windows-latest
@@ -81,14 +81,14 @@ jobs:
         run: cmake --build build --config Release -j
       - name: Unit tests
         run: |
-          .\build\Release\cas_test_working_tree.exe
-          .\build\Release\cas_test_write_buffer.exe
-          .\build\Release\cas_test_branch_context.exe
-          .\build\Release\cas_test_branch_merge.exe
-          .\build\Release\cas_test_blake3_simd.exe
-          .\build\Release\cas_test_telemetry_event.exe
-          .\build\Release\cas_test_win_helpers.exe
-          .\build\Release\cas_test_named_pipe_channel.exe
+          .\build\tests\Release\cas_test_working_tree.exe
+          .\build\tests\Release\cas_test_write_buffer.exe
+          .\build\tests\Release\cas_test_branch_context.exe
+          .\build\tests\Release\cas_test_branch_merge.exe
+          .\build\tests\Release\cas_test_blake3_simd.exe
+          .\build\tests\Release\cas_test_telemetry_event.exe
+          .\build\tests\Release\cas_test_win_helpers.exe
+          .\build\tests\Release\cas_test_named_pipe_channel.exe
 
   linux-system-tests:
     runs-on: ubuntu-latest

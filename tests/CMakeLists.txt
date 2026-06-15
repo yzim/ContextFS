@@ -187,7 +187,7 @@ if(AGENTVFS_LDPRELOAD)
     target_link_libraries(cas_test_ldpreload_preload PRIVATE dl Threads::Threads)
     target_compile_features(cas_test_ldpreload_preload PRIVATE cxx_std_17)
     target_compile_definitions(cas_test_ldpreload_preload PRIVATE
-        CAS_PRELOAD_LIB="${CMAKE_CURRENT_BINARY_DIR}/libcas_preload.so")
+        CAS_PRELOAD_LIB="$<TARGET_FILE:cas_preload>")
     add_dependencies(cas_test_ldpreload_preload cas_preload)
 endif()
 endif() # LINUX

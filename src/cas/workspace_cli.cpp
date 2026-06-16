@@ -1093,7 +1093,6 @@ static int command_init(const ParsedCommon& opts) {
         return 1;
     }
 
-    std::string cmd = "cp -a --reflink=auto -- ";
     auto shell_quote = [](const std::string& s) {
         std::string out = "'";
         for (char c : s) {
@@ -1103,6 +1102,12 @@ static int command_init(const ParsedCommon& opts) {
         out += "'";
         return out;
     };
+    std::string cmd;
+#ifdef __APPLE__
+    cmd = "cp -a ";
+#else
+    cmd = "cp -a --reflink=auto -- ";
+#endif
     cmd += shell_quote(opts.from_dir + "/.");
     cmd += " ";
     cmd += shell_quote(paths.source);

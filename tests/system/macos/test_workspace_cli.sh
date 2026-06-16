@@ -10,7 +10,7 @@ if ! [[ -d /Library/Filesystems/fuse-t.fs ]]; then
     brew install --cask macos-fuse-t/cask/fuse-t
 fi
 
-REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+REPO_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 BIN="$REPO_ROOT/build/agentvfs"
 WS_ROOT="$(mktemp -d /tmp/agentvfs-workspace-macos.XXXXXX)"
 WS_NAME="macos-workspace-cli"

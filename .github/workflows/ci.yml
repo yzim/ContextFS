@@ -200,4 +200,4 @@ jobs:
       - name: System tests
         run: |
           bash tests/system/test_macos_e2e.sh
-          bash tests/system/test_macos_workspace_cli.sh
+          bash tests/system/macos/test_workspace_cli.sh

@@ -145,10 +145,10 @@ jobs:
           run_root_system_test tests/system/test_workspace_multi_branch.sh
           run_system_test tests/system/test_cas_10cp_rollback.sh
           # eBPF-specific coverage is not runnable on the hosted Ubuntu kernel/tooling image.
-          run_root_system_test tests/system/test_cas_backend_compare.sh
-          run_root_system_test tests/system/test_cas_multi_backend.sh
+          run_system_test tests/system/test_cas_backend_compare.sh
+          run_system_test tests/system/test_cas_multi_backend.sh
           run_root_system_test tests/system/test_cas_fanotify.sh
-          run_root_system_test tests/system/test_cas_ptrace.sh
+          run_system_test tests/system/test_cas_ptrace.sh
           run_system_test tests/system/test_cas_ldpreload.sh
           run_system_test tests/system/test_cas_bpftime.sh
           run_system_test tests/system/test_cas_lua_actually_skipped.sh

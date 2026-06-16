@@ -115,6 +115,13 @@ jobs:
             liblua5.4-dev \
             lua5.4 \
             wabt
+      - name: Install WAMR runtime
+        run: |
+          curl -fsSL -o /tmp/iwasm.tar.gz \
+            https://github.com/bytecodealliance/wasm-micro-runtime/releases/download/WAMR-2.4.4/iwasm-2.4.4-x86_64-ubuntu-22.04.tar.gz
+          tar -xzf /tmp/iwasm.tar.gz -C /tmp
+          install /tmp/iwasm /usr/local/bin/iwasm
+          iwasm --version
       - name: Configure
         run: cmake -B build -DAGENTVFS_EBPF=OFF -DAGENTVFS_FANOTIFY=ON -DAGENTVFS_PTRACE=ON -DAGENTVFS_LDPRELOAD=ON -DAGENTVFS_BPFTIME=ON -DAGENTVFS_WASM=ON -DAGENTVFS_LUA=ON
       - name: Build

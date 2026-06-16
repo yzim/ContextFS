@@ -120,6 +120,7 @@ jobs:
             wabt
           sudo apt-get install -y "linux-tools-$(uname -r)" "linux-cloud-tools-$(uname -r)"
           echo "/usr/lib/linux-tools/$(uname -r)" >> "$GITHUB_PATH"
+          sudo ln -sf "/usr/lib/linux-tools/$(uname -r)/bpftool" /usr/local/bin/bpftool
       - name: Configure
         run: cmake -B build -DAGENTVFS_EBPF=ON -DAGENTVFS_FANOTIFY=ON -DAGENTVFS_PTRACE=ON -DAGENTVFS_LDPRELOAD=ON -DAGENTVFS_BPFTIME=ON -DAGENTVFS_WASM=ON -DAGENTVFS_LUA=ON
       - name: Build

@@ -102,7 +102,7 @@ Three parts, built on L0 (bounded memory / GC) and L1 (API + routing token). 2a 
 ### 2c — Platform parity track *(parallel breadth)*
 - **macOS/Windows branches.** Wire L1.2 token-based routing into the `fuse_t_adapter` and `winfsp_adapter` (cgroup v2 is unavailable off-Linux — the token *is* the routing mechanism there).
 - **Telemetry off-Linux.** Today Linux-only (eBPF / fanotify / ptrace / `LD_PRELOAD`). Scope a feasible reduced backend — FUSE/WinFsp op-level capture, or FSEvents/ETW — and set expectations that off-Linux telemetry is weaker by nature.
-- **`agentvfs workspace` CLI off-Linux.** Port `workspace_cli` state management + control plane (the Windows named-pipe channel already exists; macOS uses the AF_UNIX path).
+- **`agentvfs workspace` parity off-Linux.** macOS now has `workspace_cli` state management + control plane; finish the remaining parity work for Windows and close the feature gaps that still differ from Linux.
 
 **Parallelism note:** 2a/2b are the dependency-spine continuation; 2c is genuinely independent once the token lands, so a second contributor can drive parity while the first drives scale — but 2c *cannot start its branch work before L1.2*. That is the one hard cross-track edge.
 

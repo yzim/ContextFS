@@ -82,7 +82,7 @@ static void test_start_with_script_fails_without_runtime_callbacks() {
     cas::BackendConfig cfg{};
     bool callback_called = false;
 
-    cfg.params["script_path"] = "tests/cas/fixtures/test_policy.lua";
+    cfg.params["script_path"] = "tests/fixtures/test_policy.lua";
     CHECK(!backend.start(cfg, [&](cas::TelemetryEvent) {
         callback_called = true;
     }));

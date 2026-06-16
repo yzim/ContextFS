@@ -7,7 +7,7 @@ MNT="$ROOT/mnt"
 STORE="$ROOT/store"
 SOCK="$ROOT/control.sock"
 BIN="$(pwd)/build/agentvfs"
-HARNESS="$(pwd)/build/cas_test_fh_lifecycle"
+HARNESS="$(pwd)/build/tests/cas_test_fh_lifecycle"
 
 cleanup() {
     fusermount3 -u "$MNT" 2>/dev/null || true

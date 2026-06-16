@@ -1,5 +1,5 @@
 #!/bin/bash
-# tests/cas/test_cas_telemetry_ramp.sh — cumulative multi-backend telemetry ramp.
+# tests/system/test_cas_telemetry_ramp.sh — cumulative multi-backend telemetry ramp.
 #
 # For each K in 1..7, spawn agentvfs with the first K backends from the canonical
 # order (sources before processors), run 5 checkpoints + reverse rollback, verify
@@ -12,8 +12,8 @@
 # pipeline-failure protection while letting `pass`/`fail` count outcomes freely.
 set -uo pipefail
 
-BIN="${BIN:-$(pwd)/build-all/agentvfs}"
-PRELOAD_LIB="${PRELOAD_LIB:-$(pwd)/build-all/libcas_preload.so}"
+BIN="${BIN:-$(pwd)/build/agentvfs}"
+PRELOAD_LIB="${PRELOAD_LIB:-$(pwd)/build/libcas_preload.so}"
 ROOT="${ROOT:-/tmp/agentvfs-ramp}"
 RAMP_LIMIT="${RAMP_LIMIT:-7}"   # stop after iteration N (dev/CI smoke)
 RAMP_NEGATIVE="${RAMP_NEGATIVE:-0}"

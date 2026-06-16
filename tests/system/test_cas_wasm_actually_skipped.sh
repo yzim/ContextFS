@@ -2,7 +2,7 @@
 set -euo pipefail
 
 BIN="${BIN:-$(pwd)/build/agentvfs}"
-FIXTURE="$(pwd)/tests/cas/fixtures/test_filter.wat"
+FIXTURE="$(pwd)/tests/fixtures/test_filter.wat"
 
 if [[ ! -x "$BIN" ]]; then
     echo "SKIP test_cas_wasm: $BIN is not built"

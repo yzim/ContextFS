@@ -111,12 +111,9 @@ jobs:
             clang \
             libbpf-dev \
             libelf-dev \
-            zlib1g-dev \
-            liblua5.4-dev \
-            lua5.4 \
-            wabt
+            zlib1g-dev
       - name: Configure
-        run: cmake -B build -DAGENTVFS_EBPF=OFF -DAGENTVFS_FANOTIFY=ON -DAGENTVFS_PTRACE=ON -DAGENTVFS_LDPRELOAD=ON -DAGENTVFS_BPFTIME=ON -DAGENTVFS_WASM=ON -DAGENTVFS_LUA=ON
+        run: cmake -B build -DAGENTVFS_EBPF=OFF -DAGENTVFS_FANOTIFY=ON -DAGENTVFS_PTRACE=ON -DAGENTVFS_LDPRELOAD=ON
       - name: Build
         run: cmake --build build -j
       - name: System tests
@@ -145,14 +142,13 @@ jobs:
           run_root_system_test tests/system/test_workspace_multi_branch.sh
           run_system_test tests/system/test_cas_10cp_rollback.sh
           # eBPF-specific coverage is not runnable on the hosted Ubuntu kernel/tooling image.
+          # bpftime/Wasm/Lua are currently stubbed or placeholder-only, so
+          # keep this hosted job focused on backends with executable coverage.
           run_system_test tests/system/test_cas_backend_compare.sh
           run_system_test tests/system/test_cas_multi_backend.sh
           run_root_system_test tests/system/test_cas_fanotify.sh
           run_system_test tests/system/test_cas_ptrace.sh
           run_system_test tests/system/test_cas_ldpreload.sh
-          run_system_test tests/system/test_cas_bpftime.sh
-          run_system_test tests/system/test_cas_lua_actually_skipped.sh
-          run_system_test tests/system/test_cas_wasm_actually_skipped.sh
           run_system_test tests/system/test_start_sh.sh
           run_system_test tests/system/test_quickstart_demo_smoke.sh
 

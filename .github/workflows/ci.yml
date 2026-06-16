@@ -118,11 +118,22 @@ jobs:
             liblua5.4-dev \
             lua5.4 \
             wabt
-          sudo apt-get install -y "linux-tools-$(uname -r)" "linux-cloud-tools-$(uname -r)"
-          echo "/usr/lib/linux-tools/$(uname -r)" >> "$GITHUB_PATH"
-          sudo ln -sf "/usr/lib/linux-tools/$(uname -r)/bpftool" /usr/local/bin/bpftool
+          kernel_tools_pkg="linux-tools-$(uname -r)"
+          sudo apt-get install -y "$kernel_tools_pkg" "linux-cloud-tools-$(uname -r)"
+          bpftool_path="$(dpkg -L "$kernel_tools_pkg" | grep '/bpftool$' | head -n1 || true)"
+          if [[ -z "$bpftool_path" ]]; then
+            bpftool_path="$(find /usr/lib -path "*/$(uname -r)*/bpftool" -type f 2>/dev/null | head -n1 || true)"
+          fi
+          if [[ -z "$bpftool_path" ]]; then
+            echo "bpftool binary not found after installing $kernel_tools_pkg" >&2
+            exit 1
+          fi
+          echo "Resolved bpftool: $bpftool_path"
+          echo "BPFTOOL_PATH=$bpftool_path" >> "$GITHUB_ENV"
+          echo "$(dirname "$bpftool_path")" >> "$GITHUB_PATH"
+          sudo ln -sf "$bpftool_path" /usr/local/bin/bpftool
       - name: Configure
-        run: cmake -B build -DBPFTOOL_BIN="/usr/lib/linux-tools/$(uname -r)/bpftool" -DAGENTVFS_EBPF=ON -DAGENTVFS_FANOTIFY=ON -DAGENTVFS_PTRACE=ON -DAGENTVFS_LDPRELOAD=ON -DAGENTVFS_BPFTIME=ON -DAGENTVFS_WASM=ON -DAGENTVFS_LUA=ON
+        run: cmake -B build -DBPFTOOL_BIN="$BPFTOOL_PATH" -DAGENTVFS_EBPF=ON -DAGENTVFS_FANOTIFY=ON -DAGENTVFS_PTRACE=ON -DAGENTVFS_LDPRELOAD=ON -DAGENTVFS_BPFTIME=ON -DAGENTVFS_WASM=ON -DAGENTVFS_LUA=ON
       - name: Build
         run: cmake --build build -j
       - name: System tests

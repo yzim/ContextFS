@@ -1,5 +1,5 @@
 #!/bin/bash
-# tests/system/test_cas_telemetry_ramp.sh — cumulative multi-backend telemetry ramp.
+# tests/system/linux/test_cas_telemetry_ramp.sh — cumulative multi-backend telemetry ramp.
 #
 # For each K in 1..7, spawn agentvfs with the first K backends from the canonical
 # order (sources before processors), run 5 checkpoints + reverse rollback, verify

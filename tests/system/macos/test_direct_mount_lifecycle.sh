@@ -1,11 +1,8 @@
 #!/bin/bash
-# macOS end-to-end: install fuse-t (idempotent), mount, write,
-# checkpoint, modify, rollback, assert, unmount.
-
 set -euo pipefail
 
 if [[ "$(uname)" != "Darwin" ]]; then
-    echo "test_macos_e2e: skipping (not macOS)"
+    echo "test_direct_mount_lifecycle: skipping (not macOS)"
     exit 0
 fi
 
@@ -14,12 +11,15 @@ if ! [[ -d /Library/Filesystems/fuse-t.fs ]]; then
 fi
 
 REPO_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
-WORK="$(mktemp -d /tmp/agentvfs-e2e.XXXXXX)"
+WORK="$(mktemp -d /tmp/agentvfs-direct-mount.XXXXXX)"
 # macOS /tmp is a symlink to /private/tmp; mktemp returns the /tmp path
 # but mount(8) reports the canonical /private/tmp form. Resolve once up
 # front so SRC / MNT comparisons against `mount` output match.
 WORK="$(cd "$WORK" && pwd -P)"
-SRC="$WORK/src"; MNT="$WORK/mnt"; SOCK="$WORK/ctl.sock"; LOG="$WORK/daemon.log"
+SRC="$WORK/src"
+MNT="$WORK/mnt"
+SOCK="$WORK/ctl.sock"
+LOG="$WORK/daemon.log"
 BIN="$REPO_ROOT/build/agentvfs"
 CTL="$REPO_ROOT/build/agentvfs-ctl"
 
@@ -44,23 +44,24 @@ trap cleanup EXIT
 "$BIN" --source "$SRC" --mountpoint "$MNT" --sock "$SOCK" > "$LOG" 2>&1 &
 DAEMON_PID=$!
 
-# Wait up to 30s for mount + control socket. fuse-t's NFS-loopback init
-# is noticeably slower than libfuse3's /dev/fuse handshake, especially
-# on a cold CI runner.
 for _ in $(seq 1 120); do
     if [[ -S "$SOCK" ]] && mount | grep -q " on $MNT "; then break; fi
     if ! kill -0 "$DAEMON_PID" 2>/dev/null; then
         echo "FAIL: daemon exited before mount"
-        echo "--- daemon log ---"; cat "$LOG"
+        echo "--- daemon log ---"
+        cat "$LOG"
         exit 1
     fi
     sleep 0.25
 done
 if ! mount | grep -q " on $MNT "; then
     echo "FAIL: mount missing"
-    echo "--- expected mountpoint ---"; echo "$MNT"
-    echo "--- mount(8) output ---"; mount
-    echo "--- daemon log ---"; cat "$LOG"
+    echo "--- expected mountpoint ---"
+    echo "$MNT"
+    echo "--- mount(8) output ---"
+    mount
+    echo "--- daemon log ---"
+    cat "$LOG"
     exit 1
 fi
 [[ -S "$SOCK" ]] || { echo "FAIL: control socket missing"; exit 1; }
@@ -82,9 +83,12 @@ echo "v2" > "$MNT/data.txt"
 ROLLBACK_CONTENT="$(cat "$MNT/data.txt")"
 if [[ "$ROLLBACK_CONTENT" != "v1" ]]; then
     echo "FAIL: rollback content: got '$ROLLBACK_CONTENT'"
-    echo "--- stat after rollback ---"; stat "$MNT/data.txt" || true
-    echo "--- ctl status ---";          "$CTL" --sock "$SOCK" status || true
-    echo "--- daemon log ---";          cat "$LOG"
+    echo "--- stat after rollback ---"
+    stat "$MNT/data.txt" || true
+    echo "--- ctl status ---"
+    "$CTL" --sock "$SOCK" status || true
+    echo "--- daemon log ---"
+    cat "$LOG"
     exit 1
 fi
 
@@ -98,4 +102,4 @@ kill -0 "$DAEMON_PID" 2>/dev/null \
 mount | grep -q " on $MNT " \
     && { echo "FAIL: mount still present after shutdown"; exit 1; }
 
-echo "PASS test_macos_e2e"
+echo "PASS test_direct_mount_lifecycle"

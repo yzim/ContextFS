@@ -133,28 +133,28 @@ jobs:
 
           sudo sysctl -w kernel.yama.ptrace_scope=0
 
-          run_system_test tests/system/test_agentvfs_ctl.sh
-          run_system_test tests/system/test_workspace_cli.sh
-          run_system_test tests/system/test_cas_smoke.sh
-          run_system_test tests/system/test_cas_bootstrap.sh
-          run_system_test tests/system/test_cas_fh_lifecycle.sh
-          run_root_system_test tests/system/test_cas_branching.sh
-          run_root_system_test tests/system/test_cas_branch_merge.sh
-          run_root_system_test tests/system/test_cas_multi_branch.sh
-          run_root_system_test tests/system/test_cas_multi_branch_merge.sh
-          run_root_system_test tests/system/test_workspace_multi_branch.sh
-          run_system_test tests/system/test_cas_10cp_rollback.sh
+          run_system_test tests/system/linux/test_agentvfs_ctl.sh
+          run_system_test tests/system/linux/test_workspace_cli.sh
+          run_system_test tests/system/linux/test_cas_smoke.sh
+          run_system_test tests/system/linux/test_cas_bootstrap.sh
+          run_system_test tests/system/linux/test_cas_fh_lifecycle.sh
+          run_root_system_test tests/system/linux/test_cas_branching.sh
+          run_root_system_test tests/system/linux/test_cas_branch_merge.sh
+          run_root_system_test tests/system/linux/test_cas_multi_branch.sh
+          run_root_system_test tests/system/linux/test_cas_multi_branch_merge.sh
+          run_root_system_test tests/system/linux/test_workspace_multi_branch.sh
+          run_system_test tests/system/linux/test_cas_10cp_rollback.sh
           # eBPF-specific coverage is not runnable on the hosted Ubuntu kernel/tooling image.
-          run_system_test tests/system/test_cas_backend_compare.sh
-          run_system_test tests/system/test_cas_multi_backend.sh
-          run_root_system_test tests/system/test_cas_fanotify.sh
-          run_system_test tests/system/test_cas_ptrace.sh
-          run_system_test tests/system/test_cas_ldpreload.sh
-          run_system_test tests/system/test_cas_bpftime.sh
-          run_system_test tests/system/test_cas_lua_actually_skipped.sh
-          run_system_test tests/system/test_cas_wasm_actually_skipped.sh
-          run_system_test tests/system/test_start_sh.sh
-          run_system_test tests/system/test_quickstart_demo_smoke.sh
+          run_system_test tests/system/linux/test_cas_backend_compare.sh
+          run_system_test tests/system/linux/test_cas_multi_backend.sh
+          run_root_system_test tests/system/linux/test_cas_fanotify.sh
+          run_system_test tests/system/linux/test_cas_ptrace.sh
+          run_system_test tests/system/linux/test_cas_ldpreload.sh
+          run_system_test tests/system/linux/test_cas_bpftime.sh
+          run_system_test tests/system/linux/test_cas_lua_actually_skipped.sh
+          run_system_test tests/system/linux/test_cas_wasm_actually_skipped.sh
+          run_system_test tests/system/linux/test_start_sh.sh
+          run_system_test tests/system/linux/test_quickstart_demo_smoke.sh
 
   windows-system-tests:
     runs-on: windows-latest
@@ -184,7 +184,7 @@ jobs:
         run: cmake --build build --config Release -j
       - name: System tests
         shell: powershell
-        run: ./tests/system/windows/test_winfsp_e2e.ps1
+        run: ./tests/system/windows/test_winfsp_mount.ps1
 
   macos-system-tests:
     runs-on: macos-latest
@@ -198,4 +198,6 @@ jobs:
       - name: Build
         run: cmake --build build -j
       - name: System tests
-        run: bash tests/system/test_macos_e2e.sh
+        run: |
+          bash tests/system/macos/test_direct_mount_lifecycle.sh
+          bash tests/system/macos/test_workspace_cli.sh

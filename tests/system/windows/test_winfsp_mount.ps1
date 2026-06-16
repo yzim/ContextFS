@@ -65,7 +65,7 @@ try {
         throw "rollback didn't restore"
     }
 
-    Write-Host "test_winfsp_e2e: OK"
+    Write-Host "test_winfsp_mount: OK"
 } finally {
     if ($d -and -not $d.HasExited) { Stop-Process -Id $d.Id -Force }
     Remove-Item -Recurse -Force $src.FullName -ErrorAction SilentlyContinue

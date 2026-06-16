@@ -1,6 +1,6 @@
 #!/bin/bash
 # 5 branches x 5 checkpoints + rollback + merge through `agentvfs workspace`.
-# Run: bash tests/system/test_workspace_multi_branch.sh
+# Run: bash tests/system/linux/test_workspace_multi_branch.sh
 set -euo pipefail
 
 BIN_DIR="${BIN_DIR:-$(pwd)/build}"

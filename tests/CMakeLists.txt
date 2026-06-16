@@ -57,7 +57,7 @@ target_link_libraries(cas_test_object_store PRIVATE cas_core)
 endif()
 
 if(UNIX)
-add_executable(cas_test_fh_lifecycle system/test_cas_fh_lifecycle.cpp)
+add_executable(cas_test_fh_lifecycle system/linux/test_cas_fh_lifecycle.cpp)
 endif()
 
 add_executable(cas_test_branch_context unit/test_branch_context.cpp)

@@ -9,6 +9,7 @@
 #include "daemon.h"
 #include "platform.h"
 #include "platform/macos/fuse_t_preflight.h"
+#include "workspace_cli.h"
 
 #include <cerrno>
 #include <cstdint>
@@ -41,8 +42,13 @@ bool parse(int argc, char** argv, Args& out) {
         if      (a == "--source"      && need()) out.source = argv[++i];
         else if (a == "--mountpoint"  && need()) out.mountpoint = argv[++i];
         else if (a == "--store"       && need()) out.store = argv[++i];
-        else if (a == "--sock"        && need()) out.control_sock = argv[++i];
+        else if ((a == "--sock" || a == "--control-sock") && need()) out.control_sock = argv[++i];
         else if (a == "--volume-name" && need()) out.volume_name = argv[++i];
+        else if (a == "-o"            && need()) { ++i; }
+        else if (a == "-f")           { /* foreground is already the only mode */ }
+        else if (a.rfind("--telemetry=", 0) == 0) {
+            /* Workspace CLI can pass Linux telemetry flags; macOS v1 ignores them. */
+        }
         else if (a == "-h" || a == "--help") { usage(); return false; }
         else { usage(); return false; }
     }
@@ -67,6 +73,10 @@ bool parse(int argc, char** argv, Args& out) {
 }  // namespace
 
 int main(int argc, char** argv) {
+    if (argc >= 2 && std::string(argv[1]) == "workspace") {
+        return cas::workspace::run_workspace_cli(argc - 1, argv + 1, argv[0]);
+    }
+
     Args ca;
     if (!parse(argc, argv, ca)) return 1;
 

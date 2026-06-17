@@ -402,7 +402,8 @@ if(APPLE AND AGENTVFS_FUSE_T)
     add_executable(agentvfs
         src/cas/platform/macos/main_macos.cpp
         src/cas/platform/macos/fuse_t_adapter.cpp
-        src/cas/platform/macos/fuse_t_preflight.cpp)
+        src/cas/platform/macos/fuse_t_preflight.cpp
+        src/cas/workspace_cli.cpp)
     target_include_directories(agentvfs PRIVATE
         src/cas include ${FUSE_T_INCLUDE_DIRS})
     target_compile_options(agentvfs PRIVATE ${FUSE_T_CFLAGS_OTHER})

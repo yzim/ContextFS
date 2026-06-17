@@ -634,6 +634,18 @@ static bool pid_alive(long pid) {
 }
 
 static bool mountpoint_active(const std::string& path) {
+#ifdef __APPLE__
+    std::string cmd = "mount | grep -F -- ";
+    cmd += "'";
+    for (char c : path) {
+        if (c == '\'') cmd += "'\\''";
+        else cmd.push_back(c);
+    }
+    cmd += "'";
+    cmd += " >/dev/null";
+    int rc = system(cmd.c_str());
+    return rc == 0;
+#else
     std::string cmd = "mountpoint -q ";
     cmd += "'";
     for (char c : path) {
@@ -643,6 +655,7 @@ static bool mountpoint_active(const std::string& path) {
     cmd += "'";
     int rc = system(cmd.c_str());
     return rc == 0;
+#endif
 }
 
 static bool path_owned_by_current_user_or_absent(const std::string& path, std::string& error) {
@@ -830,6 +843,7 @@ static pid_t spawn_daemon(const std::string& self_path,
                           const std::string& telemetry,
                           bool allow_root,
                           std::string& error) {
+    (void)telemetry;
     pid_t pid = fork();
     if (pid < 0) {
         error = "fork: " + std::string(std::strerror(errno));
@@ -849,9 +863,11 @@ static pid_t spawn_daemon(const std::string& self_path,
             "--mountpoint", paths.mount,
             "--store", paths.store,
             "--control-sock", paths.socket,
-            "--telemetry=" + telemetry,
             "-f"
         };
+#ifndef __APPLE__
+        args.push_back("--telemetry=" + telemetry);
+#endif
         if (allow_root) {
             args.push_back("-o");
             args.push_back("allow_root");
@@ -870,7 +886,11 @@ static bool unmount_workspace(const std::string& mount_path) {
     pid_t pid = fork();
     if (pid < 0) return false;
     if (pid == 0) {
+#ifdef __APPLE__
+        execlp("umount", "umount", "-f", mount_path.c_str(), (char*)nullptr);
+#else
         execlp("fusermount3", "fusermount3", "-u", mount_path.c_str(), (char*)nullptr);
+#endif
         _exit(127);
     }
     int status = 0;
@@ -1073,7 +1093,6 @@ static int command_init(const ParsedCommon& opts) {
         return 1;
     }
 
-    std::string cmd = "cp -a --reflink=auto -- ";
     auto shell_quote = [](const std::string& s) {
         std::string out = "'";
         for (char c : s) {
@@ -1083,6 +1102,12 @@ static int command_init(const ParsedCommon& opts) {
         out += "'";
         return out;
     };
+    std::string cmd;
+#ifdef __APPLE__
+    cmd = "cp -a ";
+#else
+    cmd = "cp -a --reflink=auto -- ";
+#endif
     cmd += shell_quote(opts.from_dir + "/.");
     cmd += " ";
     cmd += shell_quote(paths.source);

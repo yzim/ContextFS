@@ -46,7 +46,8 @@ agentvfs-ctl.exe --sock \\.\pipe\agentvfs-<hash> checkpoint baseline
 ## Driving the daemon directly
 
 ```bash
-agentvfs workspace start my-task --from /path/to/project
+agentvfs workspace init my-task --from /path/to/project
+agentvfs workspace start my-task
 agentvfs workspace checkpoint my-task before-refactor
 # ... agent makes changes ...
 agentvfs workspace rollback my-task before-refactor
@@ -77,7 +78,7 @@ FUSE / WinFsp / fuse-t  ──►  WorkingTree (in-memory, COW)  ──►  Obje
 | Content-Addressed Store | ✅ | ✅ | ✅ |
 | Per-Agent Branches | ✅ | Coming soon | Coming soon |
 | Pluggable Telemetry | ✅ | Coming soon | Coming soon |
-| `agentvfs workspace` CLI | ✅ | Coming soon | Coming soon |
+| `agentvfs workspace` CLI | ✅ | ✅ | Coming soon |
 
 ## Build from source
 

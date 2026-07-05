@@ -85,8 +85,9 @@ int main(int argc, char** argv) {
     daemon.set_bootstrap(std::move(bs));
 
     cas::NamedPipeControlChannel chan;
-    if (!chan.start(ca.pipe_name, [&](std::string_view line) {
-            return cas::control_protocol::dispatch(daemon, line); })) {
+    if (!chan.start(ca.pipe_name, [&](std::string_view line,
+                                      const cas::PeerCredentials& peer) {
+            return cas::control_protocol::dispatch(daemon, line, peer); })) {
         std::fprintf(stderr, "agentvfs: pipe %s failed\n", ca.pipe_name.c_str());
         return 3;
     }

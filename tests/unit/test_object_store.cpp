@@ -141,6 +141,32 @@ static void test_pending_restore_round_trips() {
     std::printf("  PASS test_pending_restore_round_trips\n");
 }
 
+static void test_fsync_pending_erases_only_requested_hashes() {
+    std::string root = make_tmp_dir("pending-subset");
+    ObjectStore store(root);
+    REQUIRE(store.init_layout());
+
+    uint8_t data1[] = {21, 22, 23};
+    uint8_t data2[] = {31, 32, 33};
+    Hash h1 = store.write_blob(data1, sizeof(data1));
+    Hash h2 = store.write_blob(data2, sizeof(data2));
+    REQUIRE(h1 != ZERO_HASH);
+    REQUIRE(h2 != ZERO_HASH);
+    REQUIRE(store.pending_count() == 2);
+
+    std::string error;
+    REQUIRE(store.fsync_pending({h1}, error));
+    REQUIRE(error.empty());
+    REQUIRE(store.pending_count() == 1);
+
+    auto drained = store.drain_pending();
+    REQUIRE(drained.size() == 1);
+    REQUIRE(drained[0] == h2);
+
+    remove_dir_recursive(root);
+    std::printf("  PASS test_fsync_pending_erases_only_requested_hashes\n");
+}
+
 static void test_init_layout_rejects_unwritable_object_shard() {
     std::string root = make_tmp_dir("unwritable-shard");
     ObjectStore store(root);
@@ -164,6 +190,7 @@ int main() {
     test_fsync_shard_dirs_reports_objects_dir_failure();
     test_pending_tracks_new_writes_and_skips_dedup_hits();
     test_pending_restore_round_trips();
+    test_fsync_pending_erases_only_requested_hashes();
     test_init_layout_rejects_unwritable_object_shard();
     std::printf("PASS test_object_store\n");
     return 0;

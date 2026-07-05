@@ -557,7 +557,7 @@ static void test_control_socket_branch_merge_omits_label_and_merges() {
 
     std::string socket_path = env.root + "/control.sock";
     ControlSocket control(d);
-    auto handler = [&](std::string_view line) {
+    auto handler = [&](std::string_view line, const PeerCredentials&) {
         return control_protocol::dispatch(d, line);
     };
     REQUIRE(control.start(socket_path, handler));
@@ -593,7 +593,7 @@ static void test_control_socket_branch_merge_requires_actual_source_key() {
 
     std::string socket_path = env.root + "/control.sock";
     ControlSocket control(d);
-    auto handler = [&](std::string_view line) {
+    auto handler = [&](std::string_view line, const PeerCredentials&) {
         return control_protocol::dispatch(d, line);
     };
     REQUIRE(control.start(socket_path, handler));
@@ -624,7 +624,7 @@ static void test_control_socket_branch_merge_preserves_escaped_label() {
 
     std::string socket_path = env.root + "/control.sock";
     ControlSocket control(d);
-    auto handler = [&](std::string_view line) {
+    auto handler = [&](std::string_view line, const PeerCredentials&) {
         return control_protocol::dispatch(d, line);
     };
     REQUIRE(control.start(socket_path, handler));
@@ -659,7 +659,7 @@ static void test_control_socket_branch_merge_rejects_malformed_request() {
 
     std::string socket_path = env.root + "/control.sock";
     ControlSocket control(d);
-    auto handler = [&](std::string_view line) {
+    auto handler = [&](std::string_view line, const PeerCredentials&) {
         return control_protocol::dispatch(d, line);
     };
     REQUIRE(control.start(socket_path, handler));
@@ -697,7 +697,7 @@ static void test_control_socket_branch_merge_returns_conflict_array() {
 
     std::string socket_path = env.root + "/control.sock";
     ControlSocket control(d);
-    auto handler = [&](std::string_view line) {
+    auto handler = [&](std::string_view line, const PeerCredentials&) {
         return control_protocol::dispatch(d, line);
     };
     REQUIRE(control.start(socket_path, handler));

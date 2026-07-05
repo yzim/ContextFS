@@ -10,6 +10,27 @@
 
 namespace cas {
 
+namespace {
+
+PeerCredentials peer_credentials_for_fd(int fd) {
+    PeerCredentials peer;
+#if defined(SO_PEERCRED)
+    struct ucred cred {};
+    socklen_t len = sizeof(cred);
+    if (getsockopt(fd, SOL_SOCKET, SO_PEERCRED, &cred, &len) == 0) {
+        peer.available = true;
+        peer.pid = static_cast<int64_t>(cred.pid);
+        peer.uid = static_cast<int64_t>(cred.uid);
+        peer.gid = static_cast<int64_t>(cred.gid);
+    }
+#else
+    (void)fd;
+#endif
+    return peer;
+}
+
+} // namespace
+
 ControlSocket::ControlSocket(Daemon&) {}
 
 ControlSocket::~ControlSocket() { stop(); }
@@ -76,11 +97,12 @@ void ControlSocket::accept_loop() {
 }
 
 void ControlSocket::serve_client(int fd) {
+    PeerCredentials peer = peer_credentials_for_fd(fd);
     std::string buf;
     char ch;
     while (read(fd, &ch, 1) == 1) {
         if (ch == '\n') {
-            std::string resp = handler_(buf) + "\n";
+            std::string resp = handler_(buf, peer) + "\n";
             ssize_t n = write(fd, resp.data(), resp.size());
             (void)n;
             buf.clear();

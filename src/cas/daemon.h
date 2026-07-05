@@ -1,4 +1,5 @@
 #pragma once
+#include "agent_state_service.h"
 #include "bootstrap.h"
 #include "branch_context.h"
 #include "branch_merge.h"
@@ -8,6 +9,8 @@
 #include "object_store.h"
 #include "policy_installer.h"
 #include "refs.h"
+#include "runtime_process_posix.h"
+#include "runtime_supervisor.h"
 #include "working_tree.h"
 #include "write_buffer.h"
 #include <atomic>
@@ -83,6 +86,39 @@ public:
     PolicyInstaller* policy_installer() { return policy_installer_; }
     const PolicyInstaller* policy_installer() const { return policy_installer_; }
 
+    // Cooperative-runtime supervisor + the daemon-coupled snapshot/restore
+    // orchestrations. snapshot_runtime/restore_runtime drive the blocking
+    // rendezvous through the supervisor and couple it with CheckpointManager
+    // (branch checkpoint for snapshots, rollback for restores).
+    RuntimeSupervisor& runtime_supervisor() { return runtime_supervisor_; }
+    const RuntimeSupervisor& runtime_supervisor() const { return runtime_supervisor_; }
+    RuntimeSnapshotResult snapshot_runtime(const RuntimeSnapshotRequest& request);
+    // timeout_ms bounds the wait_for_generation_ready rendezvous; it defaults to
+    // 5000 so existing callers (and the system test, which restores with no
+    // --timeout-ms) are unchanged. A client may override it via the
+    // runtime.restore handler's optional "timeout_ms" field.
+    RuntimeRestoreResult restore_runtime(const std::string& union_state_id_hex,
+                                         uint64_t timeout_ms = 5000);
+
+    // Owns the agent-state lifecycle (append/describe/latest/restore_session)
+    // on top of Task 1's record helpers. Constructed against the ObjectStore
+    // and only used after initialize() has run init_layout(); control commands
+    // are never dispatched before initialize() completes.
+    AgentStateService& agent_state() { return agent_state_; }
+    const AgentStateService& agent_state() const { return agent_state_; }
+
+    // Reusable branch-rollback orchestration: resolves the branch under the
+    // branch checkpoint lock, calls CheckpointManager::rollback_locked against
+    // the target commit, and invalidates file handles for the target branch.
+    // Both the existing `rollback` control command and `state.restore
+    // mode=full` route through this helper so locking and FH-invalidation are
+    // defined in exactly one place. The target is a resolved commit Hash; the
+    // `rollback` command resolves its label/hash string first (via
+    // CheckpointManager::resolve_target) and `state.restore mode=full` passes
+    // the record's fs_commit directly.
+    RollbackResult rollback_branch_to_commit(const std::string& branch_name,
+                                             const Hash& target);
+
     // All branch accessors return a std::shared_ptr so the caller keeps the
     // BranchContext alive for the duration of the op, regardless of
     // concurrent delete_branch calls. This closes the use-after-free race
@@ -150,6 +186,10 @@ private:
     ObjectStore store_;
     Refs refs_;
     CheckpointManager cm_;
+    // Declared after cm_ (which itself follows store_) so it constructs after
+    // the ObjectStore it references and destructs before it. Member init-list
+    // position mirrors this declaration order.
+    AgentStateService agent_state_;
     InodeMap inode_map_;
     std::unique_ptr<Bootstrap> bootstrap_;
 
@@ -172,6 +212,13 @@ private:
 
     uint64_t session_id_ = 0;
     std::atomic<uint32_t> policy_version_{1};
+
+    // Cooperative-runtime ownership. The controller is declared BEFORE the
+    // supervisor so it constructs first; the supervisor holds a raw pointer
+    // to it. Both precede registry_ so they outlive any telemetry backend
+    // that may capture `daemon`.
+    PosixRuntimeProcessController runtime_process_controller_;
+    RuntimeSupervisor runtime_supervisor_;
 
     // Owned. Declared LAST so it is destroyed FIRST (members destruct in
     // reverse declaration order). That gets the registry torn down before

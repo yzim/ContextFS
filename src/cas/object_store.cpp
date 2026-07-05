@@ -346,4 +346,20 @@ bool ObjectStore::fsync_shard_dirs(const std::vector<Hash>& hashes) {
     return true;
 }
 
+bool ObjectStore::fsync_pending(const std::vector<Hash>& hashes,
+                                std::string& error) {
+    error.clear();
+    if (!fsync_objects(hashes)) {
+        error = "failed to fsync pending objects";
+        return false;
+    }
+    if (!fsync_shard_dirs(hashes)) {
+        error = "failed to fsync pending object shard dirs";
+        return false;
+    }
+    std::lock_guard<std::mutex> lk(pending_mu_);
+    for (const auto& h : hashes) pending_.erase(h);
+    return true;
+}
+
 } // namespace cas

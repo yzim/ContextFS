@@ -30,7 +30,9 @@ Daemon::Daemon(std::string source_root, std::string mount_point, std::string sto
     , store_root_(std::move(store_root))
     , store_(store_root_)
     , refs_(store_root_)
-    , cm_(store_, refs_) {
+    , cm_(store_, refs_)
+    , agent_state_(store_)
+    , runtime_supervisor_(&runtime_process_controller_) {
     session_id_ = now_ns();
     main_branch_ = std::make_shared<BranchContext>(0, "main");
     branches_[0] = main_branch_;
@@ -291,6 +293,26 @@ std::shared_ptr<BranchContext> Daemon::branch_by_name_locked(
     // This preserves the delete lock order: branches_mu_ -> checkpoint_mu.
     checkpoint_lock = std::unique_lock<std::mutex>(br->checkpoint_mu);
     return br;
+}
+
+RollbackResult Daemon::rollback_branch_to_commit(const std::string& branch_name,
+                                                 const Hash& target) {
+    // Same lock acquisition as the former inline `rollback` command body:
+    // branch_by_name_locked takes branches_mu_ -> checkpoint_mu in the
+    // documented order and hands back the held lock via checkpoint_lk.
+    std::unique_lock<std::mutex> checkpoint_lk;
+    auto br = branch_by_name_locked(branch_name, checkpoint_lk);
+    if (!br) return {false, ZERO_HASH, "unknown branch"};
+
+    // rollback_locked resolves the target string itself; passing the hex form
+    // of the already-resolved Hash round-trips (resolve_target finds the
+    // object in the store and returns it). FH invalidation runs inside
+    // rollback_locked via the callback, matching the original command.
+    uint32_t bid = br->branch_id;
+    return cm_.rollback_locked(
+        hash_to_hex(target), br->wt,
+        [this, bid] { invalidate_fhs_for_branch(bid); },
+        branch_name);
 }
 
 std::shared_ptr<BranchContext> Daemon::branch_for_pid(Pid pid) {
@@ -581,6 +603,398 @@ std::vector<std::shared_ptr<BranchContext>> Daemon::list_branches() {
 
 bool Daemon::is_hidden(const std::string& path) {
     return path == "/.agentvfs-store" || path.rfind("/.agentvfs-store/", 0) == 0;
+}
+
+// ---------------------------------------------------------------------------
+// Daemon-coupled runtime snapshot/restore.
+//
+// These orchestrations run on the requester's thread (a control-socket
+// handler thread) and block on the supervisor's coordination primitives
+// while the cooperative runtime's own handler threads (runtime.boundary /
+// runtime.template.ready / runtime.generation.ready) rendezvous through the
+// same supervisor. The supervisor owns no CheckpointManager knowledge; this
+// is the single place where the two meet.
+// ---------------------------------------------------------------------------
+
+RuntimeSnapshotResult Daemon::snapshot_runtime(const RuntimeSnapshotRequest& request) {
+    RuntimeSnapshotResult result;
+    result.runtime_id = request.runtime_id;
+    std::string error;
+
+    // 1. Validate runtime, cooperativity, and branch resolvability.
+    RuntimeStatus status;
+    if (!runtime_supervisor_.status(request.runtime_id, status, error)) {
+        result.error = error;  // "unknown runtime"
+        return result;
+    }
+    if (!status.cooperative) {
+        result.error = "runtime is not cooperative";
+        return result;
+    }
+    if (!branch_by_name(status.branch)) {
+        result.error = "unknown branch";
+        return result;
+    }
+
+    // 2. Open the snapshot operation in the supervisor.
+    std::string op_id;
+    if (!runtime_supervisor_.begin_snapshot(request, op_id, error)) {
+        result.error = error;
+        return result;
+    }
+
+    // 3. Block until the cooperative runtime observes the boundary.
+    std::string boundary_id;
+    if (!runtime_supervisor_.wait_for_boundary(
+            request.runtime_id, request.timeout_ms, boundary_id, error)) {
+        // Clear the pending snapshot so this runtime is not permanently
+        // snapshot-broken (begin_snapshot refuses while has_pending_snapshot),
+        // and release any already-observed boundary handler with an error.
+        std::string cancel_err;
+        runtime_supervisor_.cancel_snapshot(request.runtime_id, cancel_err);
+        result.error = error;  // "snapshot timeout"
+        return result;
+    }
+
+    // 4. Checkpoint the branch BEFORE releasing the boundary. The boundary
+    //    handler stays blocked in wait_boundary_action across this checkpoint
+    //    so the runtime cannot race new writes into the tree.
+    Hash fs_commit = ZERO_HASH;
+    std::string cp_label = "runtime:" + request.runtime_id + ":" +
+                           request.boundary_kind;
+    {
+        std::unique_lock<std::mutex> checkpoint_lk;
+        auto br = branch_by_name_locked(status.branch, checkpoint_lk);
+        if (!br) {
+            RuntimeBoundaryAction ignored;
+            runtime_supervisor_.release_boundary_with_error(
+                boundary_id, "unknown branch", ignored, error);
+            result.error = "unknown branch";
+            return result;
+        }
+        uint32_t bid = br->branch_id;
+        auto cp = cm_.checkpoint_locked(
+            cp_label, session_id_, policy_version_.load(), br->wt,
+            [this, bid, br] { return flush_fhs_for_branch(bid, br->wt); },
+            br->name);
+        if (!cp.ok) {
+            RuntimeBoundaryAction ignored;
+            runtime_supervisor_.release_boundary_with_error(
+                boundary_id, cp.error, ignored, error);
+            result.error = cp.error;
+            return result;
+        }
+        fs_commit = cp.commit_hash;
+    }
+
+    // 5. Release the boundary with action:"snapshot" (allocates the template
+    //    id and unblocks the runtime.boundary handler so it can fork).
+    RuntimeBoundaryAction action;
+    if (!runtime_supervisor_.release_boundary_for_snapshot(boundary_id, action, error)) {
+        // Defensive: if release failed the boundary handler is still parked and
+        // has_pending_snapshot is still set. cancel_snapshot releases both.
+        std::string cancel_err;
+        runtime_supervisor_.cancel_snapshot(request.runtime_id, cancel_err);
+        result.error = error;
+        return result;
+    }
+    const std::string template_id = action.template_id;
+
+    // 6. Block until the parked template reports ready.
+    if (!runtime_supervisor_.wait_for_template_ready(
+            request.runtime_id, request.timeout_ms, error)) {
+        // Template never reported ready: drop it so the registry does not
+        // retain a half-prepared template forever.
+        std::string drop_err;
+        runtime_supervisor_.drop_template(template_id, drop_err);
+        // release_boundary_for_snapshot no longer clears the pending-snapshot
+        // state (snapshots stay serialized through union-state durability), so
+        // clear it here on failure or the runtime would be permanently
+        // snapshot-broken (begin_snapshot refuses while has_pending_snapshot).
+        std::string cancel_err;
+        runtime_supervisor_.cancel_snapshot(request.runtime_id, cancel_err);
+        result.error = error;  // "snapshot timeout"
+        return result;
+    }
+
+    // 7-8. Build and write the union runtime state.
+    TemplateStatus tmpl_st;
+    std::string ts_err;
+    runtime_supervisor_.template_status(template_id, tmpl_st, ts_err);
+
+    UnionRuntimeState us;
+    us.branch = status.branch;
+    us.fs_commit = fs_commit;
+    us.runtime_id = request.runtime_id;
+    us.runtime_generation = status.generation;
+    us.template_id = template_id;
+    us.template_kind = "live_fork";
+    us.boundary_kind = request.boundary_kind;
+    us.agent_state_id = request.agent_state_id;
+    us.command_ref = status.command_ref;
+    us.resource_manifest_ref = "inline:cooperative-process-group";
+    us.warnings.push_back({
+        "process_group_descendants",
+        "Only the cooperative root runtime memory is restored; descendant processes are managed as a process group for termination/status only.",
+        false,
+    });
+    us.warnings.push_back({
+        "external_resources",
+        "External resources such as sockets, devices, network connections, and external service state are not inspected or restored by this first slice.",
+        false,
+    });
+    us.timestamp_ns = now_ns();
+    Hash union_hash = write_union_runtime_state(store_, us, error);
+    if (union_hash == ZERO_HASH) {
+        // Release the parked runtime.template.ready handler (blocked in
+        // wait_template_published) with the error. Use fail_template_publish,
+        // NOT drop_template: drop_template would erase the node under the
+        // waiter (heap-use-after-free) and never surface an error.
+        std::string fail_err;
+        std::string msg = error.empty() ? "union state write failed" : error;
+        runtime_supervisor_.fail_template_publish(template_id, msg, fail_err);
+        // Clear pending-snapshot state (see wait_for_template_ready path).
+        std::string cancel_err;
+        runtime_supervisor_.cancel_snapshot(request.runtime_id, cancel_err);
+        result.error = msg;
+        return result;
+    }
+    {
+        std::string durable_error;
+        if (!store_.fsync_pending({union_hash}, durable_error)) {
+            std::string fail_err;
+            std::string msg = durable_error.empty()
+                ? "failed to fsync union runtime state"
+                : durable_error;
+            runtime_supervisor_.fail_template_publish(template_id, msg, fail_err);
+            std::string cancel_err;
+            runtime_supervisor_.cancel_snapshot(request.runtime_id, cancel_err);
+            result.error = msg;
+            return result;
+        }
+    }
+
+    // 9. Attach the union state to the template; this unblocks the
+    //    runtime.template.ready handler.
+    if (!runtime_supervisor_.attach_union_state(
+            template_id, us.union_state_id, fs_commit, error)) {
+        std::string fail_err;
+        std::string msg = error.empty() ? "attach union state failed" : error;
+        runtime_supervisor_.fail_template_publish(template_id, msg, fail_err);
+        // Clear pending-snapshot state (see wait_for_template_ready path).
+        std::string cancel_err;
+        runtime_supervisor_.cancel_snapshot(request.runtime_id, cancel_err);
+        result.error = msg;
+        return result;
+    }
+
+    // 10. Union state is durable: the snapshot is complete. NOW clear the
+    //     pending-snapshot state so a subsequent begin_snapshot (a second
+    //     concurrent snapshot request, or the next snapshot in a loop) is
+    //     accepted. Clearing earlier (e.g. in release_boundary_for_snapshot)
+    //     would let a second snapshot retarget the first's pending_template_id
+    //     mid wait_for_template_ready.
+    {
+        std::string cancel_err;
+        runtime_supervisor_.cancel_snapshot(request.runtime_id, cancel_err);
+    }
+
+    // 11. Restore eligibility is computed (not stored): live-restorable while
+    //     the template process is alive at snapshot completion.
+    result.ok = true;
+    result.union_state_id = us.union_state_id;
+    result.fs_commit = fs_commit;
+    result.template_id = template_id;
+    result.generation = status.generation;
+    result.restore_eligibility = tmpl_st.alive
+        ? RestoreEligibility::LiveRuntimeRestorable
+        : RestoreEligibility::FsOnly;
+    return result;
+}
+
+RuntimeRestoreResult Daemon::restore_runtime(const std::string& union_state_id_hex,
+                                             uint64_t timeout_ms) {
+    RuntimeRestoreResult result;
+    std::string error;
+
+    // 1. Parse the union-state id.
+    Hash id;
+    if (!hex_to_hash_strict(union_state_id_hex, id)) {
+        result.error = "invalid union_state_id";
+        return result;
+    }
+
+    // 2. Read the union state.
+    UnionRuntimeState us;
+    if (!read_union_runtime_state(store_, id, us, error)) {
+        result.error = error;
+        return result;
+    }
+    result.runtime_id = us.runtime_id;
+    result.template_id = us.template_id;
+    result.fs_commit = us.fs_commit;
+    result.target_generation = us.runtime_generation + 1;
+
+    // 3. Verify the template is still alive.
+    TemplateStatus tmpl_st;
+    if (!runtime_supervisor_.template_status(us.template_id, tmpl_st, error)) {
+        result.error = "unknown template";
+        return result;
+    }
+    if (!tmpl_st.alive) {
+        result.error = "template is not live";
+        return result;
+    }
+
+    // 4. Resolve and validate the branch before freezing the active generation.
+    auto br = branch_by_name(us.branch);
+    if (!br) {
+        result.error = "unknown branch";
+        return result;
+    }
+    uint32_t bid = br->branch_id;
+
+    // 5. Record and validate the recovery commit (current branch tip before
+    //    rollback). This must be non-zero/readable before we freeze anything.
+    Hash recovery_commit = cm_.current_commit(us.branch);
+    if (recovery_commit == ZERO_HASH) {
+        result.error = "recovery commit not found";
+        return result;
+    }
+    std::vector<uint8_t> recovery_body;
+    if (!store_.read_commit(recovery_commit, recovery_body)) {
+        result.error = "failed to read recovery commit";
+        return result;
+    }
+    std::vector<uint8_t> target_body;
+    if (!store_.read_commit(us.fs_commit, target_body)) {
+        result.error = "failed to read target commit";
+        return result;
+    }
+    auto recover_branch_tip = [&]() {
+        std::unique_lock<std::mutex> checkpoint_lk;
+        auto br_locked = branch_by_name_locked(us.branch, checkpoint_lk);
+        if (!br_locked) return false;
+        auto rb = cm_.rollback_locked(
+            hash_to_hex(recovery_commit), br_locked->wt,
+            [this, bid] { invalidate_fhs_for_branch(bid); },
+            us.branch);
+        return rb.ok;
+    };
+
+    // 6. Start the restore intent; this freezes the active process group and
+    //    leaves the parked template alive. The template is not released yet.
+    RuntimeRestoreIntent intent;
+    intent.runtime_id = us.runtime_id;
+    intent.template_id = us.template_id;
+    intent.target_generation = us.runtime_generation + 1;
+    if (!runtime_supervisor_.begin_restore(intent, error)) {
+        result.error = error;
+        return result;
+    }
+
+    // 7. Roll the branch back to fs_commit while the template still polls wait.
+    {
+        std::unique_lock<std::mutex> checkpoint_lk;
+        auto br_locked = branch_by_name_locked(us.branch, checkpoint_lk);
+        if (!br_locked) {
+            std::string abort_err;
+            runtime_supervisor_.abort_restore(us.runtime_id, abort_err);
+            result.error = "unknown branch";
+            return result;
+        }
+        auto rb = cm_.rollback_locked(
+            hash_to_hex(us.fs_commit), br_locked->wt,
+            [this, bid] { invalidate_fhs_for_branch(bid); },
+            us.branch);
+        if (!rb.ok) {
+            std::string abort_err;
+            runtime_supervisor_.abort_restore(us.runtime_id, abort_err);
+            result.error = rb.error;
+            return result;
+        }
+    }
+    // 7. Invalidate branch file handles unconditionally (rollback_locked's
+    //    invalidate_fn also covers this, but be defensive).
+    invalidate_fhs_for_branch(bid);
+
+    // 8. Filesystem rollback is complete: release the parked template's
+    //    runtime.template.poll with action:"restore".
+    if (!runtime_supervisor_.publish_restore(us.runtime_id, error)) {
+        bool recovery_ok = recover_branch_tip();
+        std::string abort_err;
+        runtime_supervisor_.abort_restore(us.runtime_id, abort_err);
+        if (!recovery_ok) {
+            result.ok = false;
+            result.partial = "recovery_failed_runtime_resumed";
+            result.error = error;
+            return result;
+        }
+        result.error = error;
+        return result;
+    }
+
+    // 9. Block until the restored generation reports ready.
+    if (!runtime_supervisor_.wait_for_generation_ready(
+            us.runtime_id, timeout_ms, error)) {
+        // Timeout recovery: roll back to the recovery commit and resume the
+        // frozen active pgid.
+        bool recovery_ok = recover_branch_tip();
+        std::string abort_err;
+        runtime_supervisor_.abort_restore(us.runtime_id, abort_err);
+        if (!recovery_ok) {
+            // fs was rolled back to the snapshot commit (fs_commit), recovery
+            // back to the pre-restore commit failed, and abort_restore RESUMED
+            // the old active process group -- it is running, not stopped.
+            result.ok = false;
+            result.partial = "recovery_failed_runtime_resumed";
+            return result;
+        }
+        result.error = error;  // "restore timeout"
+        return result;
+    }
+
+    // 9b. Retire the previously-active process group that generation_ready()
+    //     stashed. The restored grandchild has already been acknowledged and is
+    //     running, so old-generation cleanup can use forced termination without
+    //     delaying the restored runtime's ready acknowledgement.
+    {
+        std::string retire_err;
+        if (!runtime_supervisor_.retire_pending_generation(us.runtime_id, retire_err)) {
+            // Unknown runtime would mean the runtime vanished mid-restore; the
+            // filesystem is already restored, so report partial rather than
+            // leak a frozen prior group.
+            std::string abort_err;
+            runtime_supervisor_.abort_restore(us.runtime_id, abort_err);
+            result.ok = false;
+            result.partial = "retire_unknown_prior_frozen";
+            result.error = retire_err;
+            return result;
+        }
+        // retire_pending_generation returns true (runtime known, retire record
+        // consumed) even when the terminate itself failed -- it sets retire_err
+        // and logs to stderr, but the restore genuinely succeeded (fs already
+        // rolled back, new generation running). Surface the diagnostic here so
+        // the out-param is always observed, never silently set-and-dropped; do
+        // NOT flip ok to false -- only old-generation cleanup had an issue.
+        if (!retire_err.empty()) {
+            std::fprintf(stderr,
+                         "agentvfs: restore_runtime retire warning for runtime %s: %s\n",
+                         us.runtime_id.c_str(), retire_err.c_str());
+        }
+    }
+
+    // 10. Success. Recompute restore eligibility from the template's state.
+    result.ok = true;
+    TemplateStatus tmpl_after;
+    std::string after_err;
+    if (runtime_supervisor_.template_status(us.template_id, tmpl_after, after_err) &&
+        tmpl_after.alive) {
+        result.restore_eligibility = RestoreEligibility::LiveRuntimeRestorable;
+    } else {
+        result.restore_eligibility = RestoreEligibility::FsOnly;
+    }
+    return result;
 }
 
 } // namespace cas

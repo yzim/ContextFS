@@ -1,7 +1,10 @@
 #include "control_protocol.h"
+#include "agent_state.h"
+#include "agent_state_service.h"
 #include "branch_name.h"
 #include "cas_op_bits.h"
 #include "daemon.h"
+#include "hash.h"
 #include "policy_installer.h"
 #include "telemetry_registry.h"
 
@@ -14,12 +17,17 @@
 #endif
 
 #include <cerrno>
+#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <sstream>
 #include <string>
 #include <vector>
+#ifndef _WIN32
+#include <signal.h>
+#include <unistd.h>
+#endif
 
 namespace cas {
 namespace control_protocol {
@@ -82,6 +90,39 @@ int hex_digit(char c) {
     return -1;
 }
 
+bool append_utf8(uint32_t codepoint, std::string& out) {
+    if (codepoint > 0x10ffff) return false;
+    if (codepoint >= 0xd800 && codepoint <= 0xdfff) return false;
+    if (codepoint <= 0x7f) {
+        out.push_back(static_cast<char>(codepoint));
+    } else if (codepoint <= 0x7ff) {
+        out.push_back(static_cast<char>(0xc0 | (codepoint >> 6)));
+        out.push_back(static_cast<char>(0x80 | (codepoint & 0x3f)));
+    } else if (codepoint <= 0xffff) {
+        out.push_back(static_cast<char>(0xe0 | (codepoint >> 12)));
+        out.push_back(static_cast<char>(0x80 | ((codepoint >> 6) & 0x3f)));
+        out.push_back(static_cast<char>(0x80 | (codepoint & 0x3f)));
+    } else {
+        out.push_back(static_cast<char>(0xf0 | (codepoint >> 18)));
+        out.push_back(static_cast<char>(0x80 | ((codepoint >> 12) & 0x3f)));
+        out.push_back(static_cast<char>(0x80 | ((codepoint >> 6) & 0x3f)));
+        out.push_back(static_cast<char>(0x80 | (codepoint & 0x3f)));
+    }
+    return true;
+}
+
+bool parse_json_hex4(const std::string& json, size_t& pos, uint32_t& value) {
+    if (pos + 4 > json.size()) return false;
+    value = 0;
+    for (int i = 0; i < 4; i++) {
+        int d = hex_digit(json[pos + i]);
+        if (d < 0) return false;
+        value = (value << 4) | static_cast<uint32_t>(d);
+    }
+    pos += 4;
+    return true;
+}
+
 bool parse_json_string(const std::string& json,
                       size_t& pos,
                       std::string& out) {
@@ -98,20 +139,30 @@ bool parse_json_string(const std::string& json,
             switch (esc) {
                 case '"': out.push_back('"'); break;
                 case '\\': out.push_back('\\'); break;
+                case '/': out.push_back('/'); break;
+                case 'b': out.push_back('\b'); break;
+                case 'f': out.push_back('\f'); break;
                 case 'n': out.push_back('\n'); break;
                 case 'r': out.push_back('\r'); break;
                 case 't': out.push_back('\t'); break;
                 case 'u': {
-                    if (pos + 4 > json.size()) return false;
-                    int value = 0;
-                    for (int i = 0; i < 4; i++) {
-                        int d = hex_digit(json[pos + i]);
-                        if (d < 0) return false;
-                        value = (value << 4) | d;
+                    uint32_t value = 0;
+                    if (!parse_json_hex4(json, pos, value)) return false;
+                    if (value >= 0xd800 && value <= 0xdbff) {
+                        if (pos + 2 > json.size() ||
+                            json[pos] != '\\' || json[pos + 1] != 'u') {
+                            return false;
+                        }
+                        pos += 2;
+                        uint32_t low = 0;
+                        if (!parse_json_hex4(json, pos, low)) return false;
+                        if (low < 0xdc00 || low > 0xdfff) return false;
+                        value = 0x10000 +
+                            (((value - 0xd800) << 10) | (low - 0xdc00));
+                    } else if (value >= 0xdc00 && value <= 0xdfff) {
+                        return false;
                     }
-                    pos += 4;
-                    if (value > 0xff) return false;
-                    out.push_back((char)value);
+                    if (!append_utf8(value, out)) return false;
                     break;
                 }
                 default:
@@ -124,6 +175,12 @@ bool parse_json_string(const std::string& json,
     }
     return false;
 }
+
+enum class JsonStringLookup {
+    Missing,
+    Found,
+    Malformed,
+};
 
 bool consume_json_literal(const std::string& json,
                          size_t& pos,
@@ -246,16 +303,48 @@ bool parse_branch_merge_request(const std::string& json,
     }
 }
 
+JsonStringLookup extract_str_checked(const std::string& json,
+                                     const std::string& key,
+                                     std::string& out) {
+    out.clear();
+    size_t pos = 0;
+    while (pos < json.size()) {
+        if (json[pos] != '"') {
+            ++pos;
+            continue;
+        }
+        size_t token_start = pos;
+        std::string parsed_key;
+        if (!parse_json_string(json, pos, parsed_key)) {
+            pos = token_start + 1;
+            continue;
+        }
+        skip_json_ws(json, pos);
+        if (pos >= json.size() || json[pos] != ':') {
+            continue;
+        }
+        ++pos;
+        skip_json_ws(json, pos);
+        if (parsed_key == key) {
+            if (!parse_json_string(json, pos, out)) {
+                out.clear();
+                return JsonStringLookup::Malformed;
+            }
+            return JsonStringLookup::Found;
+        }
+        if (!skip_flat_json_value(json, pos)) {
+            pos = token_start + 1;
+        }
+    }
+    return JsonStringLookup::Missing;
+}
+
 std::string extract_str(const std::string& json, const std::string& key) {
-    auto p = json.find("\"" + key + "\"");
-    if (p == std::string::npos) return {};
-    p = json.find(':', p);
-    if (p == std::string::npos) return {};
-    p = json.find('"', p);
-    if (p == std::string::npos) return {};
-    auto end = json.find('"', p + 1);
-    if (end == std::string::npos) return {};
-    return json.substr(p + 1, end - p - 1);
+    std::string out;
+    if (extract_str_checked(json, key, out) == JsonStringLookup::Found) {
+        return out;
+    }
+    return {};
 }
 
 long extract_int(const std::string& json, const std::string& key, long dflt) {
@@ -269,6 +358,221 @@ long extract_int(const std::string& json, const std::string& key, long dflt) {
     long v = std::strtol(json.c_str() + p, &end, 10);
     if (end == json.c_str() + p) return dflt;
     return v;
+}
+
+bool extract_bool(const std::string& json, const std::string& key, bool dflt) {
+    auto p = json.find("\"" + key + "\"");
+    if (p == std::string::npos) return dflt;
+    p = json.find(':', p);
+    if (p == std::string::npos) return dflt;
+    p++;
+    while (p < json.size() && (json[p] == ' ' || json[p] == '\t')) p++;
+    if (json.compare(p, 4, "true") == 0) return true;
+    if (json.compare(p, 5, "false") == 0) return false;
+    return dflt;
+}
+
+// Sanitize a client-supplied timeout before it is cast to uint64_t. A negative
+// value would wrap to a near-infinite block; an absurdly large value (over an
+// hour) likewise pins a handler thread indefinitely. Clamp both to the default
+// so the rendezvous times out within a sane bound.
+uint64_t sanitize_timeout_ms(long parsed, uint64_t dflt) {
+    if (parsed < 0 || parsed > 3600000L) return dflt;
+    return (uint64_t)parsed;
+}
+
+// Serialize an AgentStateRecord into a flat JSON object. state_id is the
+// re-derived CAS hash; fs_commit is rendered as hex (ZERO_HASH -> 64 zeros).
+// Used by state.describe / state.latest / state.restore responses.
+std::string agent_state_record_to_json(const AgentStateRecord& r) {
+    std::string out = "{";
+    out += "\"state_id\":\"" + json_escape(r.state_id) + "\"";
+    out += ",\"parent_state_id\":\"" + json_escape(r.parent_state_id) + "\"";
+    out += ",\"snapshot_base_state_id\":\"" + json_escape(r.snapshot_base_state_id) + "\"";
+    out += ",\"branch\":\"" + json_escape(r.branch) + "\"";
+    out += ",\"fs_commit\":\"" + json_escape(hash_to_hex(r.fs_commit)) + "\"";
+    out += ",\"union_state_id\":\"" + json_escape(r.union_state_id) + "\"";
+    out += ",\"runtime_id\":\"" + json_escape(r.runtime_id) + "\"";
+    out += ",\"agent_id\":\"" + json_escape(r.agent_id) + "\"";
+    out += ",\"sequence\":" + std::to_string(r.sequence);
+    out += ",\"kind\":\"";
+    out += agent_state_kind_label(r.kind);
+    out += "\"";
+    out += ",\"payload_schema\":\"" + json_escape(r.payload_schema) + "\"";
+    out += ",\"payload_inline\":\"" + json_escape(r.payload_inline) + "\"";
+    out += ",\"payload_ref\":\"" + json_escape(r.payload_ref) + "\"";
+    out += ",\"timestamp_ns\":" + std::to_string(r.timestamp_ns);
+    out += ",\"boundary\":" + std::string(r.boundary ? "true" : "false");
+    out += "}";
+    return out;
+}
+
+bool process_live(long pid) {
+#ifndef _WIN32
+    if (pid <= 0) return false;
+    if (kill((pid_t)pid, 0) == 0) return true;
+    return errno == EPERM;
+#else
+    (void)pid;
+    return true;
+#endif
+}
+
+bool process_group_for_pid(long pid, long& pgid) {
+#ifndef _WIN32
+    if (pid <= 0) return false;
+    errno = 0;
+    pid_t value = getpgid((pid_t)pid);
+    if (value < 0) return false;
+    pgid = static_cast<long>(value);
+    return true;
+#else
+    pgid = pid;
+    return pid > 0;
+#endif
+}
+
+bool parent_for_pid(long pid, long& ppid) {
+#if defined(__linux__)
+    if (pid <= 0) return false;
+    char path[64];
+    std::snprintf(path, sizeof(path), "/proc/%ld/stat", pid);
+    FILE* f = std::fopen(path, "r");
+    if (!f) return false;
+    char buf[4096];
+    bool ok = std::fgets(buf, sizeof(buf), f) != nullptr;
+    std::fclose(f);
+    if (!ok) return false;
+    const char* rp = std::strrchr(buf, ')');
+    if (!rp) return false;
+    char state = '\0';
+    long parsed_ppid = -1;
+    if (std::sscanf(rp + 1, " %c %ld", &state, &parsed_ppid) != 2) {
+        return false;
+    }
+    ppid = parsed_ppid;
+    return true;
+#else
+    (void)pid;
+    (void)ppid;
+    return false;
+#endif
+}
+
+bool peer_available_or_trusted(const PeerCredentials& peer,
+                               std::string& error) {
+    if (peer.trusted) return true;
+    if (peer.available && peer.pid > 0) return true;
+    error = "peer credentials unavailable";
+    return false;
+}
+
+bool require_peer_pid(const PeerCredentials& peer,
+                      long claimed_pid,
+                      std::string& error) {
+    if (peer.trusted) return true;
+    if (!peer_available_or_trusted(peer, error)) return false;
+    if (peer.pid != claimed_pid) {
+        error = "peer pid mismatch";
+        return false;
+    }
+    return true;
+}
+
+bool require_process_group(long pid,
+                           long claimed_pgid,
+                           std::string& error) {
+    if (pid <= 0 || claimed_pgid <= 0) {
+        error = "invalid process group";
+        return false;
+    }
+    long actual_pgid = -1;
+    if (!process_group_for_pid(pid, actual_pgid)) {
+        error = "runtime process not live";
+        return false;
+    }
+    if (actual_pgid != claimed_pgid) {
+        error = "process group mismatch";
+        return false;
+    }
+    return true;
+}
+
+bool require_launcher_peer(const PeerCredentials& peer,
+                           long root_pid,
+                           long process_group_id,
+                           std::string& error) {
+    if (!require_process_group(root_pid, process_group_id, error)) {
+        return false;
+    }
+    if (peer.trusted) return true;
+    if (!peer_available_or_trusted(peer, error)) return false;
+    long ppid = -1;
+    if (!parent_for_pid(root_pid, ppid)) {
+        error = "runtime parent not verifiable";
+        return false;
+    }
+    if (ppid != peer.pid) {
+        error = "runtime launcher mismatch";
+        return false;
+    }
+    return true;
+}
+
+bool require_runtime_peer(const PeerCredentials& peer,
+                          long pid,
+                          const RuntimeStatus& st,
+                          uint64_t generation,
+                          std::string& error) {
+    if (!require_peer_pid(peer, pid, error)) return false;
+    if (peer.trusted) return true;
+    if (st.root_pid != pid) {
+        error = "runtime peer mismatch";
+        return false;
+    }
+    if (st.generation != generation) {
+        error = "runtime generation mismatch";
+        return false;
+    }
+    long actual_pgid = -1;
+    if (!process_group_for_pid(pid, actual_pgid)) {
+        error = "runtime process not live";
+        return false;
+    }
+    if (actual_pgid != st.active_process_group_id) {
+        error = "process group mismatch";
+        return false;
+    }
+    return true;
+}
+
+bool require_template_peer(const PeerCredentials& peer,
+                           long template_pid,
+                           long template_pgid,
+                           std::string& error) {
+    if (!require_peer_pid(peer, template_pid, error)) return false;
+    if (peer.trusted) return true;
+    return require_process_group(template_pid, template_pgid, error);
+}
+
+bool require_generation_peer(const PeerCredentials& peer,
+                             long pid,
+                             long pgid,
+                             const TemplateStatus& restore_template,
+                             std::string& error) {
+    if (!require_peer_pid(peer, pid, error)) return false;
+    if (!require_process_group(pid, pgid, error)) return false;
+    if (peer.trusted) return true;
+    long ppid = -1;
+    if (!parent_for_pid(pid, ppid)) {
+        error = "generation parent not verifiable";
+        return false;
+    }
+    if (ppid != restore_template.template_pid) {
+        error = "generation template mismatch";
+        return false;
+    }
+    return true;
 }
 
 OpMask op_bit(OpType op) {
@@ -375,6 +679,15 @@ bool parse_rest_with_branch(const std::string& rest_in,
 } // anonymous namespace
 
 std::string dispatch(Daemon& daemon, std::string_view line_sv) {
+    PeerCredentials trusted;
+    trusted.trusted = true;
+    trusted.available = true;
+    return dispatch(daemon, line_sv, trusted);
+}
+
+std::string dispatch(Daemon& daemon,
+                     std::string_view line_sv,
+                     const PeerCredentials& peer) {
     std::string line(line_sv);
     std::istringstream iss(line);
     std::string cmd;
@@ -448,17 +761,250 @@ std::string dispatch(Daemon& daemon, std::string_view line_sv) {
             branch_name = tok.substr(7);
         }
 
-        std::unique_lock<std::mutex> checkpoint_lk;
-        auto br = daemon.branch_by_name_locked(branch_name, checkpoint_lk);
-        if (!br) return json_err("unknown branch");
+        // Branch existence is checked BEFORE target resolution so a missing
+        // branch surfaces as "unknown branch" — the original, pre-refactor
+        // contract. resolve_target cannot distinguish a bad target from a
+        // branch that has no ref at all (both yield ZERO_HASH), so the branch
+        // lookup must come first. This single lookup is best-effort and takes
+        // only the shared branches_mu_; Daemon::rollback_branch_to_commit then
+        // re-resolves the branch under its own exclusive lock (branches_mu_ ->
+        // checkpoint_mu) and calls rollback_locked, so there is no double-hold
+        // and a concurrent delete_branch between the two lookups still yields a
+        // correct "unknown branch" from the helper. The label/hash resolution
+        // and "target commit not found" string are NOT preserved for a missing
+        // branch: that case is "unknown branch" by historical contract.
+        if (!daemon.branch_by_name(branch_name))
+            return json_err("unknown branch");
 
-        uint32_t bid = br->branch_id;
-        auto r = daemon.checkpoint_mgr().rollback_locked(
-            target, br->wt,
-            [&daemon, bid] { daemon.invalidate_fhs_for_branch(bid); },
-            branch_name);
+        Hash target_hash = daemon.checkpoint_mgr().resolve_target(target, branch_name);
+        if (target_hash == ZERO_HASH) return json_err("target commit not found");
+
+        auto r = daemon.rollback_branch_to_commit(branch_name, target_hash);
         if (!r.ok) return json_err(r.error);
         return json_ok_str("rolled_back_to", hash_to_hex(r.rolled_back_to));
+    }
+
+    if (cmd == "state.append") {
+        std::string rest; std::getline(iss, rest);
+        AgentStateAppendRequest req;
+        auto parse_state_string = [&](const std::string& key,
+                                      std::string& out,
+                                      std::string& error) {
+            JsonStringLookup status = extract_str_checked(rest, key, out);
+            if (status == JsonStringLookup::Malformed) {
+                error = "malformed " +
+                    (key == "payload" ? std::string("payload") : key);
+                return false;
+            }
+            return true;
+        };
+        std::string parse_error;
+        if (!parse_state_string("agent_id", req.record.agent_id, parse_error))
+            return json_err(parse_error);
+        if (req.record.agent_id.empty()) return json_err("missing agent_id");
+        // The agent-state `branch` is a LABEL referencing an existing VFS
+        // branch (it becomes the leaf of <store>/state/latest/<agent>/<branch>).
+        // The service validates it via the [A-Za-z0-9_-]{1,64} rule, so "main"
+        // (the default VFS branch) is legal here. Do NOT re-introduce
+        // is_valid_branch_name — its reserved-word list does not apply.
+        std::string branch;
+        if (!parse_state_string("branch", branch, parse_error))
+            return json_err(parse_error);
+        req.record.branch = branch.empty() ? std::string("main") : branch;
+        std::string kind_text;
+        if (!parse_state_string("kind", kind_text, parse_error))
+            return json_err(parse_error);
+        if (kind_text.empty()) {
+            // `kind` is optional in the dispatch contract; an omitted kind
+            // defaults to Session. The canonical parser is strict (rejects
+            // empty), so default here before delegating.
+            req.record.kind = AgentStateKind::Session;
+        } else if (!parse_agent_state_kind(kind_text, req.record.kind)) {
+            return json_err("invalid kind");
+        }
+        if (!parse_state_string("payload_schema", req.record.payload_schema,
+                                parse_error))
+            return json_err(parse_error);
+        // `payload` is the inline payload alias used by the dispatch contract.
+        if (!parse_state_string("payload", req.record.payload_inline,
+                                parse_error))
+            return json_err(parse_error);
+        if (!parse_state_string("payload_ref", req.record.payload_ref,
+                                parse_error))
+            return json_err(parse_error);
+        std::string parent;
+        if (!parse_state_string("parent_state_id", parent, parse_error))
+            return json_err(parse_error);
+        if (!parent.empty()) req.record.parent_state_id = parent;
+        std::string snap;
+        if (!parse_state_string("snapshot_base_state_id", snap, parse_error))
+            return json_err(parse_error);
+        if (!snap.empty()) req.record.snapshot_base_state_id = snap;
+        std::string fs_hex;
+        if (!parse_state_string("fs_commit", fs_hex, parse_error))
+            return json_err(parse_error);
+        if (!fs_hex.empty()) {
+            if (!hex_to_hash_strict(fs_hex, req.record.fs_commit))
+                return json_err("invalid fs_commit");
+        }
+        std::string uid;
+        if (!parse_state_string("union_state_id", uid, parse_error))
+            return json_err(parse_error);
+        if (!uid.empty()) req.record.union_state_id = uid;
+        if (!parse_state_string("runtime_id", req.record.runtime_id,
+                                parse_error))
+            return json_err(parse_error);
+        long seq = extract_int(rest, "sequence", 0);
+        if (seq < 0) seq = 0;
+        req.record.sequence = static_cast<uint64_t>(seq);
+        long tns = extract_int(rest, "timestamp_ns", 0);
+        if (tns < 0) tns = 0;
+        req.record.timestamp_ns = static_cast<uint64_t>(tns);
+        if (extract_bool(rest, "boundary", false)) req.record.boundary = true;
+        req.sync = extract_bool(rest, "sync", false);
+        auto res = daemon.agent_state().append(req);
+        if (!res.ok) {
+            // Partial success: the state blob was made durable (fsync'd by
+            // write_agent_state_record) but the latest-ref publish failed. The
+            // service populates state_id + durability in that case; surface
+            // them so a controller can record/explain the orphan. Retry is
+            // content-addressed, so re-appending the same record yields the
+            // same state_id. When state_id is empty (e.g. a validation guard
+            // fired before any write), keep the simple error form.
+            if (!res.state_id.empty()) {
+                std::string out = "{\"ok\":false,\"error\":\"";
+                out += json_escape(res.error);
+                out += "\",\"state_id\":\"";
+                out += json_escape(res.state_id);
+                out += "\",\"durability\":\"";
+                out += json_escape(res.durability);
+                out += "\"}";
+                return out;
+            }
+            return json_err(res.error);
+        }
+        std::string out = "{\"ok\":true,\"state_id\":\"";
+        out += json_escape(res.state_id);
+        out += "\",\"durability\":\"";
+        out += json_escape(res.durability);
+        out += "\"}";
+        return out;
+    }
+
+    if (cmd == "state.describe") {
+        std::string rest; std::getline(iss, rest);
+        std::string sid = extract_str(rest, "state_id");
+        if (sid.empty()) return json_err("missing state_id");
+        auto res = daemon.agent_state().describe(sid);
+        if (!res.ok) return json_err(res.error);
+        std::string out = "{\"ok\":true,\"state\":";
+        out += agent_state_record_to_json(res.record);
+        out += "}";
+        return out;
+    }
+
+    if (cmd == "state.latest") {
+        std::string rest; std::getline(iss, rest);
+        std::string agent = extract_str(rest, "agent_id");
+        if (agent.empty()) return json_err("missing agent_id");
+        std::string branch = extract_str(rest, "branch");
+        if (branch.empty()) branch = "main";
+        auto res = daemon.agent_state().latest(agent, branch);
+        if (!res.ok) return json_err(res.error);
+        std::string out = "{\"ok\":true,\"state\":";
+        out += agent_state_record_to_json(res.record);
+        out += "}";
+        return out;
+    }
+
+    if (cmd == "state.restore") {
+        std::string rest; std::getline(iss, rest);
+        std::string sid = extract_str(rest, "state_id");
+        if (sid.empty()) return json_err("missing state_id");
+        std::string mode = extract_str(rest, "mode");
+        if (mode.empty()) mode = "session";
+        // Shared across full/runtime modes; harmless for session.
+        uint64_t timeout_ms = sanitize_timeout_ms(
+            extract_int(rest, "timeout_ms", 2000), 2000);
+
+        if (mode == "session") {
+            // Bounded semantic chain walk: newest-first back to the snapshot
+            // base (or session root). max_depth bounds the walk so a runaway
+            // or pathological chain cannot pin the handler thread.
+            const size_t max_depth = 256;
+            auto res = daemon.agent_state().restore_session(sid, max_depth);
+            if (!res.ok) return json_err(res.error);
+            std::string out = "{\"ok\":true,\"mode\":\"session\",\"chain\":[";
+            for (size_t i = 0; i < res.chain.size(); ++i) {
+                if (i) out += ",";
+                out += agent_state_record_to_json(res.chain[i]);
+            }
+            out += "]}";
+            return out;
+        }
+
+        // full / runtime both need the semantic record first.
+        auto d = daemon.agent_state().describe(sid);
+        if (!d.ok) return json_err(d.error);
+
+        if (mode == "full") {
+            // Full restore = semantic state + FS rollback to fs_commit. The
+            // FS anchor is mandatory: a state without fs_commit cannot roll
+            // a branch back to anything.
+            if (d.record.fs_commit == ZERO_HASH)
+                return json_err("state has no fs_commit");
+            auto rb = daemon.rollback_branch_to_commit(
+                d.record.branch, d.record.fs_commit);
+            if (!rb.ok) return json_err(rb.error);
+            std::string out = "{\"ok\":true,\"mode\":\"full\",\"state\":";
+            out += agent_state_record_to_json(d.record);
+            out += ",\"rolled_back_to\":\"";
+            out += json_escape(hash_to_hex(rb.rolled_back_to));
+            out += "\"}";
+            return out;
+        }
+
+        if (mode == "runtime") {
+            // Runtime restore = semantic state + live-runtime restore. The
+            // union_state_id anchor is mandatory. The semantic record is
+            // ALWAYS surfaced (even on degraded/partial runtime restore) so
+            // the controller never loses the semantic result.
+            if (d.record.union_state_id.empty())
+                return json_err("state has no union_state_id");
+            auto rr = daemon.restore_runtime(d.record.union_state_id, timeout_ms);
+            std::string out = "{\"ok\":";
+            out += (rr.ok ? "true" : "false");
+            out += ",\"mode\":\"runtime\",\"state\":";
+            out += agent_state_record_to_json(d.record);
+            if (rr.ok) {
+                out += ",\"runtime\":{\"ok\":true,\"template_id\":\"";
+                out += json_escape(rr.template_id);
+                out += "\",\"target_generation\":";
+                out += std::to_string(rr.target_generation);
+                out += ",\"fs_commit\":\"";
+                out += json_escape(hash_to_hex(rr.fs_commit));
+                out += "\",\"runtime_id\":\"";
+                out += json_escape(rr.runtime_id);
+                out += "\",\"restore_eligibility\":\"";
+                out += restore_eligibility_to_string(rr.restore_eligibility);
+                out += "\"}";
+            } else if (!rr.partial.empty()) {
+                // Degraded recovery: surface the daemon's partial label.
+                out += ",\"runtime\":{\"ok\":false,\"partial\":\"";
+                out += json_escape(rr.partial);
+                out += "\"}";
+            }
+            if (!rr.ok) {
+                out += ",\"error\":\"";
+                out += json_escape(rr.error);
+                out += "\"}";
+            } else {
+                out += "}";
+            }
+            return out;
+        }
+
+        return json_err("invalid mode");
     }
 
     if (cmd == "session.register") {
@@ -663,6 +1209,300 @@ std::string dispatch(Daemon& daemon, std::string_view line_sv) {
         }
         out += "]}";
         return out;
+    }
+
+    // -----------------------------------------------------------------
+    // Cooperative runtime control commands. The blocking rendezvous
+    // (runtime.snapshot / runtime.boundary / runtime.template.ready /
+    // runtime.generation.ready) park the per-connection handler thread on
+    // the supervisor while Daemon::snapshot_runtime / restore_runtime drive
+    // the matching side.
+    // -----------------------------------------------------------------
+    if (cmd == "runtime.create") {
+        std::string rest; std::getline(iss, rest);
+        RuntimeCreateRequest req;
+        req.runtime_id = extract_str(rest, "runtime_id");
+        req.branch = extract_str(rest, "branch");
+        if (req.branch.empty()) req.branch = "main";
+        req.root_pid = extract_int(rest, "root_pid", -1);
+        req.process_group_id = extract_int(rest, "process_group_id", -1);
+        req.command_ref = extract_str(rest, "command_ref");
+        req.cwd = extract_str(rest, "cwd");
+        req.cooperative = extract_bool(rest, "cooperative", false);
+        req.control_token = extract_str(rest, "control_token");
+        if (req.runtime_id.empty()) return json_err("missing runtime_id");
+        if (!daemon.branch_by_name(req.branch)) return json_err("unknown branch");
+        if (req.control_token.empty()) return json_err("missing control token");
+        if (!process_live(req.root_pid)) return json_err("runtime process not live");
+        if (req.process_group_id <= 0) return json_err("invalid process group");
+        std::string error;
+        if (!require_launcher_peer(peer, req.root_pid, req.process_group_id, error))
+            return json_err(error);
+        if (!daemon.runtime_supervisor().register_runtime(req, error))
+            return json_err(error);
+        char buf[160];
+        std::snprintf(buf, sizeof(buf),
+            "{\"ok\":true,\"runtime_id\":\"%s\",\"generation\":1}",
+            json_escape(req.runtime_id).c_str());
+        return buf;
+    }
+
+    if (cmd == "runtime.status") {
+        std::string rest; std::getline(iss, rest);
+        std::string rid = extract_str(rest, "runtime_id");
+        if (rid.empty()) return json_err("missing runtime_id");
+        RuntimeStatus st;
+        std::string error;
+        if (!daemon.runtime_supervisor().status(rid, st, error))
+            return json_err(error);
+        std::string out = "{\"ok\":true,\"runtime_id\":\"";
+        out += json_escape(st.runtime_id);
+        out += "\",\"branch\":\"";
+        out += json_escape(st.branch);
+        out += "\",\"root_pid\":";
+        out += std::to_string(st.root_pid);
+        out += ",\"active_process_group_id\":";
+        out += std::to_string(st.active_process_group_id);
+        out += ",\"generation\":";
+        out += std::to_string(st.generation);
+        out += ",\"cooperative\":";
+        out += st.cooperative ? "true" : "false";
+        out += ",\"command_ref\":\"";
+        out += json_escape(st.command_ref);
+        out += "\",\"restore_eligibility\":\"";
+        out += restore_eligibility_to_string(st.restore_eligibility);
+        out += "\",\"templates\":[";
+        for (size_t i = 0; i < st.templates.size(); i++) {
+            if (i) out += ",";
+            out += "{\"template_id\":\"";
+            out += json_escape(st.templates[i].template_id);
+            out += "\",\"alive\":";
+            out += st.templates[i].alive ? "true" : "false";
+            out += "}";
+        }
+        out += "]}";
+        return out;
+    }
+
+    if (cmd == "runtime.list") {
+        auto runtimes = daemon.runtime_supervisor().list();
+        std::string out = "{\"ok\":true,\"runtimes\":[";
+        for (size_t i = 0; i < runtimes.size(); i++) {
+            if (i) out += ",";
+            const RuntimeStatus& st = runtimes[i];
+            out += "{\"runtime_id\":\"";
+            out += json_escape(st.runtime_id);
+            out += "\",\"branch\":\"";
+            out += json_escape(st.branch);
+            out += "\",\"generation\":";
+            out += std::to_string(st.generation);
+            out += ",\"restore_eligibility\":\"";
+            out += restore_eligibility_to_string(st.restore_eligibility);
+            out += "\"}";
+        }
+        out += "]}";
+        return out;
+    }
+
+    if (cmd == "runtime.snapshot") {
+        std::string rest; std::getline(iss, rest);
+        RuntimeSnapshotRequest req;
+        req.runtime_id = extract_str(rest, "runtime_id");
+        if (req.runtime_id.empty()) return json_err("missing runtime_id");
+        req.boundary_kind = extract_str(rest, "boundary_kind");
+        if (req.boundary_kind.empty()) req.boundary_kind = "manual";
+        JsonStringLookup agent_state_lookup =
+            extract_str_checked(rest, "agent_state_id", req.agent_state_id);
+        if (agent_state_lookup == JsonStringLookup::Malformed) {
+            return json_err("invalid agent_state_id");
+        }
+        // Validate a directly-supplied agent_state_id BEFORE any snapshot
+        // orchestration starts: it must be empty (meaning "unlinked") or a
+        // full 64-character lowercase/uppercase hex hash. Anything else means
+        // the controller referenced a state that cannot exist, and snapshot
+        // must refuse rather than record a dangling id into the union state.
+        if (!req.agent_state_id.empty()) {
+            if (!is_hex_hash(req.agent_state_id))
+                return json_err("invalid agent_state_id");
+        }
+        req.timeout_ms = sanitize_timeout_ms(extract_int(rest, "timeout_ms", 1000), 1000);
+        auto r = daemon.snapshot_runtime(req);
+        if (!r.ok) return json_err(r.error);
+        std::string out = "{\"ok\":true,\"union_state_id\":\"";
+        out += json_escape(r.union_state_id);
+        out += "\",\"fs_commit\":\"";
+        out += json_escape(hash_to_hex(r.fs_commit));
+        out += "\",\"template_id\":\"";
+        out += json_escape(r.template_id);
+        out += "\",\"runtime_id\":\"";
+        out += json_escape(r.runtime_id);
+        out += "\",\"generation\":";
+        out += std::to_string(r.generation);
+        out += ",\"restore_eligibility\":\"";
+        out += restore_eligibility_to_string(r.restore_eligibility);
+        out += "\"}";
+        return out;
+    }
+
+    if (cmd == "runtime.restore") {
+        std::string rest; std::getline(iss, rest);
+        std::string uid;
+        JsonStringLookup uid_lookup =
+            extract_str_checked(rest, "union_state_id", uid);
+        if (uid_lookup == JsonStringLookup::Malformed)
+            return json_err("invalid union_state_id");
+        if (uid.empty()) return json_err("missing union_state_id");
+        if (!is_hex_hash(uid)) return json_err("invalid union_state_id");
+        // Optional restore timeout (default 5000); clamp negatives/absurd values
+        // before the uint64_t cast (see sanitize_timeout_ms).
+        uint64_t restore_timeout_ms = sanitize_timeout_ms(
+            extract_int(rest, "timeout_ms", 5000), 5000);
+        auto r = daemon.restore_runtime(uid, restore_timeout_ms);
+        if (!r.ok && r.partial.empty()) return json_err(r.error);
+        std::string out;
+        if (!r.ok) {
+            // Partial recovery: surface the daemon's partial label verbatim
+            // (e.g. recovery_failed_runtime_resumed / retire_unknown_prior_frozen)
+            // so the operator sees the actual end state.
+            out = "{\"ok\":false,\"partial\":\"" + json_escape(r.partial) +
+                  "\",\"error\":\"";
+            out += json_escape(r.error);
+            out += "\"}";
+            return out;
+        }
+        out = "{\"ok\":true,\"template_id\":\"";
+        out += json_escape(r.template_id);
+        out += "\",\"target_generation\":";
+        out += std::to_string(r.target_generation);
+        out += ",\"fs_commit\":\"";
+        out += json_escape(hash_to_hex(r.fs_commit));
+        out += "\",\"runtime_id\":\"";
+        out += json_escape(r.runtime_id);
+        out += "\",\"restore_eligibility\":\"";
+        out += restore_eligibility_to_string(r.restore_eligibility);
+        out += "\"}";
+        return out;
+    }
+
+    if (cmd == "runtime.drop") {
+        std::string rest; std::getline(iss, rest);
+        std::string tid = extract_str(rest, "template_id");
+        if (tid.empty()) return json_err("missing template_id");
+        std::string error;
+        if (!daemon.runtime_supervisor().drop_template(tid, error))
+            return json_err(error);
+        return "{\"ok\":true}";
+    }
+
+    if (cmd == "runtime.boundary") {
+        std::string rest; std::getline(iss, rest);
+        std::string rid = extract_str(rest, "runtime_id");
+        if (rid.empty()) return json_err("missing runtime_id");
+        std::string token = extract_str(rest, "control_token");
+        int64_t pid = extract_int(rest, "pid", -1);
+        uint64_t generation = (uint64_t)extract_int(rest, "generation", 0);
+        std::string bkind = extract_str(rest, "boundary_kind");
+        if (bkind.empty()) bkind = "manual";
+        RuntimeStatus st;
+        std::string error;
+        if (!daemon.runtime_supervisor().status(rid, st, error))
+            return json_err(error);
+        if (!require_runtime_peer(peer, pid, st, generation, error))
+            return json_err(error);
+        std::string boundary_id;
+        if (!daemon.runtime_supervisor().observe_boundary(
+                rid, token, pid, generation, bkind, boundary_id, error)) {
+            // No pending snapshot matches (or runtime unknown). Unknown
+            // runtime is a real error; "no pending snapshot" lets the
+            // runtime continue without forking a template.
+            if (error == "unknown runtime") return json_err(error);
+            if (error == "no pending snapshot")
+                return "{\"ok\":true,\"action\":\"continue\"}";
+            return json_err(error);
+        }
+        // Block until the daemon's snapshot_runtime releases the boundary.
+        RuntimeBoundaryAction action;
+        if (!daemon.runtime_supervisor().wait_boundary_action(
+                boundary_id, sanitize_timeout_ms(extract_int(rest, "timeout_ms", 5000), 5000),
+                action, error))
+            return json_err(error);
+        if (action.action == "error") return json_err(action.error);
+        std::string out = "{\"ok\":true,\"action\":\"snapshot\",\"operation_id\":\"";
+        out += json_escape(action.operation_id);
+        out += "\",\"template_id\":\"";
+        out += json_escape(action.template_id);
+        out += "\"}";
+        return out;
+    }
+
+    if (cmd == "runtime.template.ready") {
+        std::string rest; std::getline(iss, rest);
+        std::string rid = extract_str(rest, "runtime_id");
+        std::string tid = extract_str(rest, "template_id");
+        std::string token = extract_str(rest, "control_token");
+        if (tid.empty()) return json_err("missing template_id");
+        int64_t tpid = extract_int(rest, "template_pid", -1);
+        int64_t tpgid = extract_int(rest, "template_process_group_id", -1);
+        uint64_t generation = (uint64_t)extract_int(rest, "generation", 0);
+        std::string error;
+        if (!require_template_peer(peer, tpid, tpgid, error))
+            return json_err(error);
+        if (!daemon.runtime_supervisor().template_ready(
+                rid, token, tid, tpid, tpgid, generation, error))
+            return json_err(error);
+        // Block until the daemon publishes (or fails) the union state for
+        // this template.
+        if (!daemon.runtime_supervisor().wait_template_published(
+                tid, sanitize_timeout_ms(extract_int(rest, "timeout_ms", 5000), 5000), error))
+            return json_err(error);
+        return "{\"ok\":true}";
+    }
+
+    if (cmd == "runtime.template.poll") {
+        std::string rest; std::getline(iss, rest);
+        std::string tid = extract_str(rest, "template_id");
+        std::string token = extract_str(rest, "control_token");
+        if (tid.empty()) return json_err("missing template_id");
+        TemplateStatus tmpl;
+        std::string error;
+        if (!daemon.runtime_supervisor().template_status(tid, tmpl, error))
+            return json_err(error);
+        if (!require_peer_pid(peer, tmpl.template_pid, error))
+            return json_err(error);
+        RuntimeTemplateAction action;
+        if (!daemon.runtime_supervisor().template_poll(tid, token, action, error))
+            return json_err(error);
+        std::string out = "{\"ok\":true,\"action\":\"";
+        out += json_escape(action.action);
+        out += "\"";
+        if (action.action == "restore") {
+            out += ",\"target_generation\":";
+            out += std::to_string(action.target_generation);
+        }
+        out += "}";
+        return out;
+    }
+
+    if (cmd == "runtime.generation.ready") {
+        std::string rest; std::getline(iss, rest);
+        std::string rid = extract_str(rest, "runtime_id");
+        if (rid.empty()) return json_err("missing runtime_id");
+        std::string token = extract_str(rest, "control_token");
+        int64_t pid = extract_int(rest, "pid", -1);
+        int64_t apgid = extract_int(rest, "active_process_group_id", -1);
+        uint64_t generation = (uint64_t)extract_int(rest, "generation", 0);
+        std::string error;
+        TemplateStatus restore_template;
+        if (!daemon.runtime_supervisor().restore_template_status(
+                rid, restore_template, error))
+            return json_err(error);
+        if (!restore_template.alive) return json_err("no live restore template");
+        if (!require_generation_peer(peer, pid, apgid, restore_template, error))
+            return json_err(error);
+        if (!daemon.runtime_supervisor().generation_ready(
+                rid, token, pid, apgid, generation, error))
+            return json_err(error);
+        return "{\"ok\":true}";
     }
 
     return json_err("unknown command");

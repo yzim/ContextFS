@@ -105,8 +105,9 @@ int main(int argc, char** argv) {
     daemon.set_bootstrap(std::move(bs));
 
     cas::ControlSocket csock(daemon);
-    if (!csock.start(ca.control_sock, [&](std::string_view line) {
-            return cas::control_protocol::dispatch(daemon, line);
+    if (!csock.start(ca.control_sock, [&](std::string_view line,
+                                          const cas::PeerCredentials& peer) {
+            return cas::control_protocol::dispatch(daemon, line, peer);
         })) {
         std::fprintf(stderr,
                      "agentvfs: failed to bind control socket %s (errno=%d)\n",

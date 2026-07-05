@@ -16,7 +16,8 @@ int main() {
     std::atomic<int> calls{0};
     std::string pipe = "\\\\.\\pipe\\agentvfs-test-" +
                        std::to_string(GetCurrentProcessId());
-    assert(server.start(pipe, [&](std::string_view req) {
+    assert(server.start(pipe, [&](std::string_view req,
+                                  const cas::PeerCredentials&) {
         calls++;
         return "{\"ok\":true,\"echo\":\"" + std::string(req) + "\"}";
     }));

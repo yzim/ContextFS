@@ -67,6 +67,32 @@ add_executable(cas_test_branch_merge unit/test_branch_merge.cpp)
 target_link_libraries(cas_test_branch_merge PRIVATE cas_core)
 
 if(UNIX)
+add_executable(cas_test_runtime_state unit/test_runtime_state.cpp)
+target_link_libraries(cas_test_runtime_state PRIVATE cas_core)
+endif()
+
+if(UNIX)
+add_executable(cas_test_agent_state unit/test_agent_state.cpp)
+target_link_libraries(cas_test_agent_state PRIVATE cas_core)
+endif()
+
+if(UNIX)
+add_executable(cas_test_agent_state_service unit/test_agent_state_service.cpp)
+target_link_libraries(cas_test_agent_state_service PRIVATE cas_core)
+endif()
+
+if(UNIX)
+add_executable(cas_test_runtime_supervisor unit/test_runtime_supervisor.cpp)
+target_link_libraries(cas_test_runtime_supervisor PRIVATE cas_core Threads::Threads)
+endif()
+
+if(UNIX)
+add_executable(cas_test_runtime_process_posix
+    unit/test_runtime_process_posix.cpp)
+target_link_libraries(cas_test_runtime_process_posix PRIVATE cas_core Threads::Threads)
+endif()
+
+if(UNIX)
 add_executable(cas_test_branch_merge_commit unit/test_branch_merge_commit.cpp)
 target_link_libraries(cas_test_branch_merge_commit PRIVATE cas_core)
 endif()
@@ -86,6 +112,22 @@ add_executable(cas_test_branch_persistence
 target_link_libraries(cas_test_branch_persistence PRIVATE cas_core)
 if(AGENTVFS_EBPF)
     target_link_libraries(cas_test_branch_persistence PRIVATE ${LIBBPF_LIBRARIES} elf z)
+endif()
+
+add_executable(cas_test_runtime_control
+    unit/test_runtime_control.cpp
+    support/ebpf_loader_stub.cpp)
+target_link_libraries(cas_test_runtime_control PRIVATE cas_core Threads::Threads)
+if(AGENTVFS_EBPF)
+    target_link_libraries(cas_test_runtime_control PRIVATE ${LIBBPF_LIBRARIES} elf z)
+endif()
+
+add_executable(cas_test_agent_state_control
+    unit/test_agent_state_control.cpp
+    support/ebpf_loader_stub.cpp)
+target_link_libraries(cas_test_agent_state_control PRIVATE cas_core Threads::Threads)
+if(AGENTVFS_EBPF)
+    target_link_libraries(cas_test_agent_state_control PRIVATE ${LIBBPF_LIBRARIES} elf z)
 endif()
 endif() # UNIX
 
@@ -189,5 +231,15 @@ if(AGENTVFS_LDPRELOAD)
     target_compile_definitions(cas_test_ldpreload_preload PRIVATE
         CAS_PRELOAD_LIB="$<TARGET_FILE:cas_preload>")
     add_dependencies(cas_test_ldpreload_preload cas_preload)
+endif()
+
+add_executable(agentvfs_runtime_counter_fixture
+    fixtures/runtime_counter_fixture.cpp
+    ../src/runtime/runtime_client.cpp)
+target_include_directories(agentvfs_runtime_counter_fixture PRIVATE
+    ../src/cas ../src/runtime)
+target_compile_features(agentvfs_runtime_counter_fixture PRIVATE cxx_std_17)
+if(NOT MSVC)
+    target_compile_options(agentvfs_runtime_counter_fixture PRIVATE -Wall -Wextra -Wpedantic)
 endif()
 endif() # LINUX

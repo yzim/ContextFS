@@ -37,6 +37,20 @@ int usage() {
         "  branch merge <source> --into <target> [--label <label>]\n"
         "  session register --cgroup <p> --id <n> [--verbosity <v>] [--branch <name>]\n"
         "  session unregister --cgroup <p>\n"
+        "  runtime create                           unsupported; use agentvfs-run\n"
+        "  runtime snapshot <runtime-id> [--boundary <kind>] [--timeout-ms <n>] [--agent-state <state-id>]\n"
+        "  runtime restore <union-state-id> [--timeout-ms <n>]\n"
+        "  runtime status <runtime-id>\n"
+        "  runtime list\n"
+        "  runtime drop <template-id>\n"
+        "  state append --agent <id> --kind <kind> --schema <schema> --payload <json>\n"
+        "           [--branch <name>] [--parent <state-id>] [--snapshot-base <state-id>]\n"
+        "           [--fs-commit <hash>] [--union-state <hash>] [--sync]\n"
+        "           (without --sync: returns a logical-only state id; state latest is unchanged;\n"
+        "            with --sync: parent + snapshot-base anchor a durable state that updates latest)\n"
+        "  state describe <state-id>\n"
+        "  state latest --agent <id> [--branch <name>]\n"
+        "  state restore <state-id> [--mode session|full|runtime] [--timeout-ms <n>]\n"
         "  policy install <file|->                install policy rules from file or stdin\n"
         "  raw <line...>                          send a verbatim line to the socket\n"
         "\n"
@@ -381,6 +395,35 @@ std::string find_flag(const std::vector<std::pair<std::string, std::string>>& fl
     return dflt;
 }
 
+// Validate that a flag value is a base-10 integer (optional leading sign, then
+// digits, fully consumed). Used for --pid/--pgid/--timeout-ms so a non-numeric
+// value is rejected BEFORE send_line rather than producing malformed wire JSON.
+bool is_numeric_flag(const std::string& s) {
+    if (s.empty()) return false;
+    errno = 0;
+    char* end = nullptr;
+    (void)std::strtol(s.c_str(), &end, 10);
+    if (errno != 0 || end == s.c_str() || *end != '\0') return false;
+    return true;
+}
+
+// Validate that a flag value is a full 64-character hex hash (the same shape
+// the control-protocol `runtime.snapshot` handler enforces server-side). Used
+// for --agent-state so a malformed id is rejected BEFORE send_line rather than
+// being recorded into the wire JSON. Mirrors the hex64 check in
+// control_protocol.cpp.
+bool is_hex64_flag(const std::string& s) {
+    if (s.size() != 64) return false;
+    for (char c : s) {
+        if (!((c >= '0' && c <= '9') ||
+              (c >= 'a' && c <= 'f') ||
+              (c >= 'A' && c <= 'F'))) {
+            return false;
+        }
+    }
+    return true;
+}
+
 } // namespace
 
 int main(int argc, char** argv) {
@@ -488,6 +531,227 @@ int main(int argc, char** argv) {
         }
         if (json) return emit(resp, true);
         return emit_ok_or_error(resp);
+    }
+
+    if (cmd == "runtime") {
+        if (i >= argc) { std::fprintf(stderr, "agentvfs-ctl: runtime requires create|snapshot|restore|status|list|drop\n"); return 2; }
+        std::string sub = argv[i++];
+        std::vector<std::pair<std::string, std::string>> flags;
+        std::vector<std::string> positional;
+        std::string line;
+
+        if (sub == "create") {
+            if (split_flags(argc, argv, i, flags, positional) != 0) return usage();
+            std::fprintf(stderr,
+                "agentvfs-ctl: runtime create is unsupported; use agentvfs-run\n");
+            return 2;
+        } else if (sub == "snapshot") {
+            if (split_flags(argc, argv, i, flags, positional) != 0) return usage();
+            if (positional.empty()) {
+                std::fprintf(stderr, "agentvfs-ctl: runtime snapshot requires <runtime-id>\n"); return 2;
+            }
+            std::string rid = positional[0];
+            std::string boundary = find_flag(flags, "boundary", "manual");
+            std::string timeout = find_flag(flags, "timeout-ms", "1000");
+            if (!is_numeric_flag(timeout)) { std::fprintf(stderr, "agentvfs-ctl: runtime snapshot requires numeric --timeout-ms\n"); return 2; }
+            // --agent-state is optional: absent/empty means "unlinked"; a
+            // present value MUST be a 64-hex state id so the wire JSON never
+            // carries a malformed reference. Validate BEFORE the socket
+            // request (mirrors --timeout-ms). The control-protocol handler
+            // re-validates so non-CLI clients are checked too.
+            std::string agent_state = find_flag(flags, "agent-state");
+            if (!agent_state.empty() && !is_hex64_flag(agent_state)) {
+                std::fprintf(stderr,
+                    "agentvfs-ctl: runtime snapshot requires 64-hex --agent-state\n");
+                return 2;
+            }
+            line = "runtime.snapshot {\"runtime_id\":\"" + json_escape(rid)
+                 + "\",\"boundary_kind\":\"" + json_escape(boundary)
+                 + "\",\"timeout_ms\":" + timeout;
+            if (!agent_state.empty()) {
+                line += ",\"agent_state_id\":\"" + json_escape(agent_state) + "\"";
+            }
+            line += "}";
+        } else if (sub == "restore") {
+            if (split_flags(argc, argv, i, flags, positional) != 0) return usage();
+            if (positional.empty()) {
+                std::fprintf(stderr, "agentvfs-ctl: runtime restore requires <union-state-id>\n"); return 2;
+            }
+            std::string uid = positional[0];
+            if (!is_hex64_flag(uid)) {
+                std::fprintf(stderr,
+                    "agentvfs-ctl: runtime restore requires 64-hex <union-state-id>\n");
+                return 2;
+            }
+            std::string timeout = find_flag(flags, "timeout-ms");
+            if (!timeout.empty() && !is_numeric_flag(timeout)) {
+                std::fprintf(stderr, "agentvfs-ctl: runtime restore requires numeric --timeout-ms\n"); return 2;
+            }
+            line = "runtime.restore {\"union_state_id\":\"" + json_escape(uid) + "\"";
+            if (!timeout.empty()) line += ",\"timeout_ms\":" + timeout;
+            line += "}";
+        } else if (sub == "status") {
+            if (split_flags(argc, argv, i, flags, positional) != 0) return usage();
+            if (positional.empty()) {
+                std::fprintf(stderr, "agentvfs-ctl: runtime status requires <runtime-id>\n"); return 2;
+            }
+            line = "runtime.status {\"runtime_id\":\"" + json_escape(positional[0]) + "\"}";
+        } else if (sub == "list") {
+            if (split_flags(argc, argv, i, flags, positional) != 0) return usage();
+            line = "runtime.list {}";
+        } else if (sub == "drop") {
+            if (split_flags(argc, argv, i, flags, positional) != 0) return usage();
+            if (positional.empty()) {
+                std::fprintf(stderr, "agentvfs-ctl: runtime drop requires <template-id>\n"); return 2;
+            }
+            line = "runtime.drop {\"template_id\":\"" + json_escape(positional[0]) + "\"}";
+        } else {
+            return usage();
+        }
+
+        std::string resp = send_line(sock, line);
+        if (resp.empty()) {
+            std::fprintf(stderr, "agentvfs-ctl: socket %s: %s\n",
+                         sock.c_str(), std::strerror(errno));
+            return 3;
+        }
+        if (json) return emit(resp, true);
+        if (sub == "create") return emit_field(resp, "runtime_id");
+        if (sub == "snapshot") return emit_field(resp, "union_state_id");
+        if (sub == "restore") {
+            if (!ok_flag(resp)) {
+                std::string err = extract_str(resp, "error");
+                std::fprintf(stderr, "agentvfs-ctl: %s\n",
+                             err.empty() ? resp.c_str() : err.c_str());
+                return 1;
+            }
+            long gen = extract_int(resp, "target_generation");
+            std::string tid = extract_str(resp, "template_id");
+            std::fprintf(stdout, "target_generation=%ld template_id=%s\n", gen, tid.c_str());
+            return 0;
+        }
+        if (sub == "status" || sub == "list") return emit(resp, true);
+        return emit_ok_or_error(resp);
+    }
+
+    if (cmd == "state") {
+        if (i >= argc) {
+            std::fprintf(stderr,
+                "agentvfs-ctl: state requires append|describe|latest|restore\n");
+            return 2;
+        }
+        std::string sub = argv[i++];
+        std::vector<std::pair<std::string, std::string>> flags;
+        std::vector<std::string> positional;
+        std::string line;
+
+        if (sub == "append") {
+            // --sync is a value-less boolean. split_flags expects every --flag
+            // to consume the following token as its value, so a trailing --sync
+            // would be rejected as malformed. Pull --sync tokens out into a
+            // filtered argv view first, then let split_flags (with its
+            // duplicate-flag rejection) handle the rest. Duplicate --sync is
+            // silently collapsed to a single true (it carries no value).
+            bool sync = false;
+            std::vector<std::string> args;
+            for (int k = i; k < argc; ++k) {
+                if (std::string(argv[k]) == "--sync") { sync = true; continue; }
+                args.push_back(argv[k]);
+            }
+            std::vector<char*> argv2(args.size() ? args.size() : 1);
+            for (size_t k = 0; k < args.size(); ++k) argv2[k] = args[k].data();
+            if (split_flags((int)args.size(), argv2.data(), 0, flags, positional) != 0)
+                return usage();
+
+            std::string agent = find_flag(flags, "agent");
+            if (agent.empty()) { std::fprintf(stderr, "agentvfs-ctl: state append requires --agent\n"); return 2; }
+            std::string kind = find_flag(flags, "kind");
+            if (kind.empty()) { std::fprintf(stderr, "agentvfs-ctl: state append requires --kind\n"); return 2; }
+            std::string schema = find_flag(flags, "schema");
+            if (schema.empty()) { std::fprintf(stderr, "agentvfs-ctl: state append requires --schema\n"); return 2; }
+            std::string payload = find_flag(flags, "payload");
+            if (payload.empty()) { std::fprintf(stderr, "agentvfs-ctl: state append requires --payload\n"); return 2; }
+            // branch defaults to "main" both here and server-side; send it
+            // explicitly so the wire is unambiguous.
+            std::string branch = find_flag(flags, "branch", "main");
+            std::string parent = find_flag(flags, "parent");
+            std::string snapshot_base = find_flag(flags, "snapshot-base");
+            std::string fs_commit = find_flag(flags, "fs-commit");
+            std::string union_state = find_flag(flags, "union-state");
+            // --sync anchors a durable state that updates `state latest`, but
+            // the service requires both parent_state_id and
+            // snapshot_base_state_id to reference readable states when sync is
+            // set. Surface that BEFORE the socket request so a user who passes
+            // --sync without the required anchors gets a CLI-side hint rather
+            // than a generic server error.
+            if (sync && parent.empty()) {
+                std::fprintf(stderr,
+                    "agentvfs-ctl: state append --sync requires --parent <state-id>\n");
+                return 2;
+            }
+            if (sync && snapshot_base.empty()) {
+                std::fprintf(stderr,
+                    "agentvfs-ctl: state append --sync requires --snapshot-base <state-id>\n");
+                return 2;
+            }
+
+            line = "state.append {\"agent_id\":\"" + json_escape(agent)
+                 + "\",\"kind\":\"" + json_escape(kind)
+                 + "\",\"payload_schema\":\"" + json_escape(schema)
+                 + "\",\"payload\":\"" + json_escape(payload)
+                 + "\",\"branch\":\"" + json_escape(branch) + "\"";
+            if (!parent.empty())         line += ",\"parent_state_id\":\"" + json_escape(parent) + "\"";
+            if (!snapshot_base.empty())  line += ",\"snapshot_base_state_id\":\"" + json_escape(snapshot_base) + "\"";
+            if (!fs_commit.empty())      line += ",\"fs_commit\":\"" + json_escape(fs_commit) + "\"";
+            if (!union_state.empty())    line += ",\"union_state_id\":\"" + json_escape(union_state) + "\"";
+            if (sync) line += ",\"sync\":true";
+            line += "}";
+        } else if (sub == "describe") {
+            if (split_flags(argc, argv, i, flags, positional) != 0) return usage();
+            if (positional.empty()) {
+                std::fprintf(stderr, "agentvfs-ctl: state describe requires <state-id>\n"); return 2;
+            }
+            line = "state.describe {\"state_id\":\"" + json_escape(positional[0]) + "\"}";
+        } else if (sub == "latest") {
+            if (split_flags(argc, argv, i, flags, positional) != 0) return usage();
+            std::string agent = find_flag(flags, "agent");
+            if (agent.empty()) { std::fprintf(stderr, "agentvfs-ctl: state latest requires --agent\n"); return 2; }
+            std::string branch = find_flag(flags, "branch", "main");
+            line = "state.latest {\"agent_id\":\"" + json_escape(agent)
+                 + "\",\"branch\":\"" + json_escape(branch) + "\"}";
+        } else if (sub == "restore") {
+            if (split_flags(argc, argv, i, flags, positional) != 0) return usage();
+            if (positional.empty()) {
+                std::fprintf(stderr, "agentvfs-ctl: state restore requires <state-id>\n"); return 2;
+            }
+            std::string mode = find_flag(flags, "mode", "session");
+            std::string timeout = find_flag(flags, "timeout-ms");
+            if (!timeout.empty() && !is_numeric_flag(timeout)) {
+                std::fprintf(stderr, "agentvfs-ctl: state restore requires numeric --timeout-ms\n"); return 2;
+            }
+            line = "state.restore {\"state_id\":\"" + json_escape(positional[0])
+                 + "\",\"mode\":\"" + json_escape(mode) + "\"";
+            if (!timeout.empty()) line += ",\"timeout_ms\":" + timeout;
+            line += "}";
+        } else {
+            return usage();
+        }
+
+        std::string resp = send_line(sock, line);
+        if (resp.empty()) {
+            std::fprintf(stderr, "agentvfs-ctl: socket %s: %s\n",
+                         sock.c_str(), std::strerror(errno));
+            return 3;
+        }
+        // describe / latest / restore return structured JSON objects (a state
+        // record or a session chain); emit them verbatim like runtime status /
+        // list and branch list, in both text and --json modes. append prints
+        // just the state_id in text mode and the full JSON in --json mode.
+        if (sub == "append") {
+            if (json) return emit(resp, true);
+            return emit_field(resp, "state_id");
+        }
+        return emit(resp, true);
     }
 
     if (cmd == "policy") {

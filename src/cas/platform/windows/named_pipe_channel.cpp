@@ -59,7 +59,8 @@ void NamedPipeControlChannel::serve_one_client(void* raw) {
         char ch; DWORD got = 0;
         if (!ReadFile(h, &ch, 1, &got, nullptr) || got != 1) break;
         if (ch == '\n') {
-            std::string resp = handler_(buf) + "\n";
+            PeerCredentials peer;
+            std::string resp = handler_(buf, peer) + "\n";
             DWORD written = 0;
             WriteFile(h, resp.data(), (DWORD)resp.size(), &written, nullptr);
             buf.clear();

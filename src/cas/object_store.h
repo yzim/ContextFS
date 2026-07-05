@@ -34,12 +34,19 @@ public:
 
     bool fsync_objects(const std::vector<Hash>& hashes);
     bool fsync_shard_dirs(const std::vector<Hash>& hashes);
+    bool fsync_pending(const std::vector<Hash>& hashes, std::string& error);
 
     // Tracks objects that have been written-and-renamed but whose containing
     // shard dir has not yet been fsync'd. Drained at checkpoint time so each
     // object is made durable exactly once. On fsync failure the caller
     // re-inserts the drained set via restore_pending so the next checkpoint
     // retries.
+    //
+    // fsync_pending() is the subset-safe counterpart for code paths that need
+    // to publish one object before the next full checkpoint. It fsyncs only the
+    // requested objects/directories and erases only those hashes from pending_,
+    // so concurrent checkpoint/merge publishers never see unrelated objects
+    // temporarily hidden from drain_pending().
     std::vector<Hash> drain_pending();
     void restore_pending(const std::vector<Hash>& hashes);
     size_t pending_count() const;

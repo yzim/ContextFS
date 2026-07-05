@@ -66,10 +66,17 @@ public:
 
     Hash current_commit(const std::string& branch_name = "main") const;
 
-private:
+    // Resolves a rollback target string into a commit Hash. A 64-char hex hash
+    // that names an existing object is returned as-is; any other string is
+    // treated as a commit label and matched by walking the branch's first-parent
+    // commit chain. Returns ZERO_HASH if nothing matches. Exposed so the
+    // Daemon's rollback_branch_to_commit helper and the `rollback` control
+    // command can share one resolution path instead of duplicating the
+    // label walk.
     Hash resolve_target(const std::string& target,
                         const std::string& branch_name);
 
+private:
     ObjectStore& store_;
     Refs& refs_;
 };

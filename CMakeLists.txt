@@ -123,6 +123,10 @@ set(CAS_CORE_PORTABLE_SOURCES
     src/cas/branch_router.cpp
     src/cas/branch_name.cpp
     src/cas/branch_merge.cpp
+    src/cas/runtime_state.cpp
+    src/cas/agent_state.cpp
+    src/cas/agent_state_service.cpp
+    src/cas/runtime_supervisor.cpp
     src/cas/telemetry_event.cpp
     src/cas/telemetry_registry.cpp
     src/cas/control_protocol.cpp
@@ -132,6 +136,7 @@ set(CAS_CORE_PORTABLE_SOURCES
 )
 set(CAS_CORE_POSIX_SOURCES
     src/cas/control_socket.cpp
+    src/cas/runtime_process_posix.cpp
 )
 
 option(AGENTVFS_BLAKE3_SIMD "Enable runtime-dispatched BLAKE3 SIMD paths" ON)
@@ -453,6 +458,19 @@ if(WIN32 AND AGENTVFS_WINFSP)
 endif()
 if(APPLE AND AGENTVFS_FUSE_T)
     install(TARGETS agentvfs RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
+endif()
+
+# ── agentvfs-run cooperative runtime launcher (Linux) ───────────────
+if(LINUX)
+add_executable(agentvfs-run
+    src/runtime/agentvfs_run.cpp)
+target_include_directories(agentvfs-run PRIVATE src/cas src/runtime)
+target_compile_features(agentvfs-run PRIVATE cxx_std_17)
+if(NOT MSVC)
+    target_compile_options(agentvfs-run PRIVATE -Wall -Wextra -Wpedantic)
+endif()
+install(TARGETS agentvfs-run
+    RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
 endif()
 
 # ── uninstall target ────────────────────────────────────────────────

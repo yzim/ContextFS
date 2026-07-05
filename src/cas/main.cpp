@@ -377,8 +377,8 @@ static int run_daemon_main(int argc, char** argv) {
 #endif
 
     cas::ControlSocket csock(daemon);
-    auto handler = [&](std::string_view line) {
-        return cas::control_protocol::dispatch(daemon, line);
+    auto handler = [&](std::string_view line, const cas::PeerCredentials& peer) {
+        return cas::control_protocol::dispatch(daemon, line, peer);
     };
     if (!csock.start(ca.control_sock, handler)) {
         std::fprintf(stderr, "agentvfs: failed to bind control socket %s\n",

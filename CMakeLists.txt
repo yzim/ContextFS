@@ -473,6 +473,19 @@ install(TARGETS agentvfs-run
     RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
 endif()
 
+# ── cooperative runtime client shared library (Linux) ───────────────
+# Python harnesses (benchmarks/speculative-ml-research) dlopen this to call
+# agentvfs_runtime_boundary() / agentvfs_runtime_current_generation().
+if(LINUX)
+add_library(agentvfs_runtime_client SHARED
+    src/runtime/runtime_client.cpp)
+target_include_directories(agentvfs_runtime_client PRIVATE src/cas src/runtime)
+target_compile_features(agentvfs_runtime_client PRIVATE cxx_std_17)
+if(NOT MSVC)
+    target_compile_options(agentvfs_runtime_client PRIVATE -Wall -Wextra -Wpedantic)
+endif()
+endif()
+
 # ── uninstall target ────────────────────────────────────────────────
 configure_file(
     ${CMAKE_CURRENT_SOURCE_DIR}/cmake/cmake_uninstall.cmake.in

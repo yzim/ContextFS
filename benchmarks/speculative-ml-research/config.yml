@@ -1,0 +1,29 @@
+actor:
+  model: "deepseek-v4-pro"              # any strong OpenAI-compatible model
+  base_url_env: ACTOR_BASE_URL  # e.g. https://open.bigmodel.cn/api/paas/v4
+  api_key_env: ACTOR_API_KEY
+  timeout_s: 300
+  max_tokens: 16384             # one complete ~7k-token train.py + margin
+speculator:
+  model: "deepseek-v4-pro"      # SAME model as the Actor (paper §3.1: same
+                                # model + speed prompt maximizes accuracy);
+                                # speed comes from compact edit-block output
+  base_url_env: SPEC_BASE_URL
+  api_key_env: SPEC_API_KEY
+  timeout_s: 120
+  max_tokens: 8192              # k=5 SEARCH/REPLACE candidates, not full files
+k: 5          # candidates predicted (accuracy scored over all of them)
+k_launch: 3   # top-confidence candidates actually pre-launched (§5 selective
+              # launching; 3 trainers x OMP 4 = 12 threads on this 24-core box)
+steps: 10
+train_budget_s: 30
+train_timeout_s: 900
+paths:
+  autoresearch: ./vendor/autoresearch
+  agentvfs_bin: ../../build/agentvfs
+  ctl_bin: ../../build/agentvfs-ctl
+
+# export ACTOR_BASE_URL=https://api.deepseek.com
+# export ACTOR_API_KEY=sk-...            # <-- your DeepSeek key
+# export SPEC_BASE_URL=$ACTOR_BASE_URL
+# export SPEC_API_KEY=$ACTOR_API_KEY

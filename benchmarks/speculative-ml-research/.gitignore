@@ -1,0 +1,7 @@
+# Real-run outputs: benchmarks/speculative-ml-research/results/<mode>-<timestamp>/
+/results/
+# Local run configs — may be edited to hold credentials by mistake; never track
+/config-smoke.yml
+/config-*.local.yml
+# tee'd run logs
+/*.log

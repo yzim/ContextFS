@@ -155,6 +155,45 @@ cmake --build build -j
 sudo cmake --install build    # allow_root enables sudo access
 ```
 
+### Cooperative Runtime Snapshots
+
+AgentVFS can couple a filesystem checkpoint with a live process template for
+programs launched with `agentvfs-run` and linked with the AgentVFS runtime
+client. This is not CRIU and it is not arbitrary PID rollback: the runtime must
+call `agentvfs_runtime_boundary()` at a quiescent point. At that boundary
+AgentVFS checkpoints the branch, the runtime forks a parked template, and
+`agentvfs-ctl runtime restore <union-state-id>` restores the branch plus a new
+active generation forked from the template.
+
+Only `agentvfs-run` registers cooperative runtimes; `agentvfs-ctl runtime create`
+is intentionally unsupported because lifecycle messages carry a launcher-issued
+control token and are bound to Unix-domain peer credentials. Live template
+memory is not crash durable and is lost if the template, daemon, or host dies.
+The CAS union state remains inspectable, but restore eligibility degrades to
+filesystem-only when the live template is gone. Descendant processes are not
+memory-cloned; they are tracked only as a process group for status and
+retirement. During restore, AgentVFS promotes the restored generation only after
+it reports ready, then force-retires the old frozen active process group so the
+restore path does not wait on graceful shutdown for a process that cannot run.
+External resources such as sockets and devices are recorded as warnings in the
+union state rather than claimed as restored.
+
+### Agent State Journal
+
+AgentVFS stores semantic agent continuation state as CAS-backed records. These
+records capture session, execution, tool-call, filesystem-link, runtime-resource,
+external-handle, and runtime-snapshot metadata. They are not process-memory
+snapshots; live process restoration remains the cooperative `agentvfs-run`
+runtime path.
+
+Use `agentvfs-ctl state append` to publish a state, `state describe` or
+`state latest` to inspect it, and `state restore` to restore semantic state,
+filesystem state, or a linked runtime snapshot when available.
+
+Only synced states advance `state latest`. If a state references a large CAS
+payload, AgentVFS fsyncs the payload and state blobs before publishing the
+latest ref.
+
 ## License
 
 Licensed under the Apache License, Version 2.0. See [LICENSE](LICENSE).

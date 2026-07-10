@@ -33,6 +33,19 @@ __pycache__/
 # Local-only baseline projects used by benchmarks/agent-sim/ — not shipped
 baselines/
 
+# Local-only benchmark corpora and reference papers; not shipped
+benchmarks/AgentBench/
+benchmarks/RoadmapBench/
+benchmarks/SWE-bench/
+benchmarks/SWE-smith/
+benchmarks/TASTE-task-synthesis-from-tool-sequence-evolution/
+benchmarks/beaver/
+benchmarks/codeclash/
+benchmarks/osworld/
+docs/*.pdf
+docs/papers/
+thirdparty/
+
 # Project-instructions for Claude Code sessions; per-developer
 CLAUDE.md
 .claude/

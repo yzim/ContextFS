@@ -589,12 +589,23 @@ int run_filesystem(Daemon& daemon, const MountOptions& opts) {
     static char prog_name[] = "agentvfs";
     static char fg_flag[]   = "-f";
     static char st_flag[]   = "-s";
+    // attr_timeout / entry_timeout / negative_timeout = 0 are critical (same
+    // as the macOS backend): the kernel dentry/attr cache is shared across
+    // ALL processes, while we serve per-branch views and mutate the tree via
+    // rollback/merge. With libfuse's 1s defaults, a still-cached positive
+    // dentry makes the kernel skip LOOKUP and send OPEN for a path the
+    // working tree no longer has — O_CREAT then fails ENOENT instead of
+    // reaching CREATE (observed as create-after-rollback failures).
+    static char opt_flag[]  = "-o";
+    static char cache_opts[] = "attr_timeout=0,entry_timeout=0,negative_timeout=0";
 
     std::vector<char*> fargv;
     fargv.push_back(prog_name);
     fargv.push_back(const_cast<char*>(opts.mountpoint.c_str()));
     if (opts.foreground) fargv.push_back(fg_flag);
     if (opts.single_threaded) fargv.push_back(st_flag);
+    fargv.push_back(opt_flag);
+    fargv.push_back(cache_opts);
     for (auto& s : opts.passthrough_args) fargv.push_back(const_cast<char*>(s.c_str()));
 
     return fuse_main((int)fargv.size(), fargv.data(), &ops, &daemon);

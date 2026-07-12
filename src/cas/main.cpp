@@ -5,6 +5,7 @@
 #ifdef AGENTVFS_EBPF
 #include "backends/ebpf_backend.h"
 #include "platform/linux/ebpf_policy_installer.h"
+#include "routing_fence.h"
 #endif
 #ifdef AGENTVFS_FANOTIFY
 #include "backends/fanotify_backend.h"
@@ -21,6 +22,7 @@
 #ifdef AGENTVFS_WASM
 #include "backends/wasm_backend.h"
 #endif
+#include "cgroup_watch.h"
 #include "control_protocol.h"
 #include "control_socket.h"
 #include "daemon.h"
@@ -375,6 +377,37 @@ static int run_daemon_main(int argc, char** argv) {
         daemon.set_policy_installer(ebpf_pi.get());
     }
 #endif
+
+#ifdef AGENTVFS_EBPF
+    // Routing fence: independent of the telemetry ebpf backend. Load
+    // failure (non-root, no CAP_BPF, no BTF) leaves the router on strict
+    // per-request membership reads. Lifetime spans run_daemon_main, like
+    // ebpf_pi above.
+    auto routing_fence = std::make_unique<cas::RoutingFence>();
+    if (routing_fence->load_and_attach()) {
+        cas::RoutingFence* fence = routing_fence.get();
+        daemon.router().attach_fence(
+            [fence] { return fence->generation(); },
+            [fence](cas::Pid pid) { return fence->track(pid); });
+        std::fprintf(stderr, "agentvfs: routing fence active\n");
+    }
+#endif
+
+    // Cgroup delete watch: unprivileged, independent of the fence. While
+    // active the router skips the per-resolve leaf revalidation stat —
+    // external rmdir of a registered cgroup arrives as an eviction event
+    // instead. Start failure keeps the strict per-resolve stat. Declared
+    // after `daemon`, so the event thread joins before the router its
+    // callback captures is destroyed.
+    auto cgroup_watch = std::make_unique<cas::CgroupWatch>(
+        [&daemon](const std::string&, uint64_t inode) {
+            daemon.router().evict_cgroup_id(inode);
+        });
+    if (cgroup_watch->start()) {
+        daemon.set_cgroup_watch(cgroup_watch.get());
+        daemon.router().set_leaf_revalidation(false);
+        std::fprintf(stderr, "agentvfs: cgroup delete watch active\n");
+    }
 
     cas::ControlSocket csock(daemon);
     auto handler = [&](std::string_view line, const cas::PeerCredentials& peer) {

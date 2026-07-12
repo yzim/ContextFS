@@ -5,6 +5,7 @@
 #include <cstdio>
 #include <cstring>
 #include <filesystem>
+#include <limits>
 #include <random>
 #include <set>
 #include <utility>
@@ -12,6 +13,30 @@
 namespace cas {
 
 namespace fs = std::filesystem;
+
+BlobView::~BlobView() { reset(); }
+
+BlobView::BlobView(BlobView&& other) noexcept
+    : fd_(other.fd_), payload_size_(other.payload_size_) {
+    other.fd_ = -1;
+    other.payload_size_ = 0;
+}
+
+BlobView& BlobView::operator=(BlobView&& other) noexcept {
+    if (this == &other) return *this;
+    reset();
+    fd_ = other.fd_;
+    payload_size_ = other.payload_size_;
+    other.fd_ = -1;
+    other.payload_size_ = 0;
+    return *this;
+}
+
+void BlobView::reset() noexcept {
+    if (fd_ >= 0) close(fd_);
+    fd_ = -1;
+    payload_size_ = 0;
+}
 
 namespace {
 
@@ -255,6 +280,67 @@ bool ObjectStore::read_blob(const Hash& hash, std::vector<uint8_t>& out) {
     if (body.size() - 8 != size_le) return false;
     out.assign(body.begin() + 8, body.end());
     return true;
+}
+
+int ObjectStore::open_blob(const Hash& hash, BlobView& out) const {
+    set_last_error("");
+    std::string path = object_path(hash);
+    int fd = open(path.c_str(), O_RDONLY | O_BINARY | O_CLOEXEC | O_NOFOLLOW);
+    if (fd < 0) {
+        int saved = errno;
+        set_last_error(std::string("open blob view: ") + std::strerror(saved));
+        return (saved == EMFILE || saved == ENFILE) ? saved : EIO;
+    }
+    auto fail = [&](int error, const char* message) {
+        close(fd);
+        set_last_error(message);
+        return error;
+    };
+
+    int64_t physical_size = static_cast<int64_t>(lseek(fd, 0, SEEK_END));
+    if (physical_size < 0 || lseek(fd, 0, SEEK_SET) < 0)
+        return fail(EIO, "open blob view: cannot seek object");
+
+    uint8_t header[BlobView::kPayloadOffset]{};
+    size_t got = 0;
+    while (got < sizeof(header)) {
+        ssize_t n = read(fd, header + got, sizeof(header) - got);
+        if (n < 0 && errno == EINTR) continue;
+        if (n <= 0) return fail(EIO, "open blob view: truncated header");
+        got += static_cast<size_t>(n);
+    }
+    if (std::memcmp(header, "blob", 4) != 0)
+        return fail(EIO, "open blob view: invalid type tag");
+
+    uint64_t payload_size = 0;
+    std::memcpy(&payload_size, header + 4, sizeof(payload_size));
+    if (payload_size > static_cast<uint64_t>(INT64_MAX) -
+                           BlobView::kPayloadOffset)
+        return fail(EOVERFLOW, "open blob view: payload size overflows offset");
+    if (physical_size != static_cast<int64_t>(BlobView::kPayloadOffset + payload_size))
+        return fail(EIO, "open blob view: encoded size does not match object");
+
+    out = BlobView(fd, payload_size);
+    return 0;
+}
+
+int ObjectStore::blob_payload_size(const Hash& hash, uint64_t& size_out) const {
+    {
+        std::shared_lock<std::shared_mutex> lk(size_cache_mu_);
+        auto it = size_cache_.find(hash);
+        if (it != size_cache_.end()) {
+            size_out = it->second;
+            return 0;
+        }
+    }
+    BlobView view;
+    int err = open_blob(hash, view);
+    if (err != 0) return err;  // errors are re-probed, never cached
+    size_out = view.payload_size();
+    std::unique_lock<std::shared_mutex> lk(size_cache_mu_);
+    if (size_cache_.size() >= kSizeCacheCap) size_cache_.clear();
+    size_cache_.emplace(hash, size_out);
+    return 0;
 }
 
 Hash ObjectStore::write_tree(const std::vector<uint8_t>& serialized) {

@@ -51,6 +51,12 @@ target_link_libraries(cas_test_working_tree PRIVATE cas_core)
 add_executable(cas_test_write_buffer unit/test_write_buffer.cpp)
 target_link_libraries(cas_test_write_buffer PRIVATE cas_core)
 
+add_executable(cas_test_branch_router unit/test_branch_router.cpp)
+target_link_libraries(cas_test_branch_router PRIVATE cas_core)
+
+add_executable(cas_test_cgroup_watch unit/test_cgroup_watch.cpp)
+target_link_libraries(cas_test_cgroup_watch PRIVATE cas_core Threads::Threads)
+
 if(UNIX)
 add_executable(cas_test_object_store unit/test_object_store.cpp)
 target_link_libraries(cas_test_object_store PRIVATE cas_core)
@@ -147,6 +153,10 @@ target_link_libraries(cas_test_blake3_simd PRIVATE cas_core)
 endif()
 
 if(LINUX)
+add_executable(cas_test_cgroup_watch_kernfs system/test_cgroup_watch_kernfs.cpp)
+target_link_libraries(cas_test_cgroup_watch_kernfs PRIVATE cas_core Threads::Threads)
+target_compile_options(cas_test_cgroup_watch_kernfs PRIVATE -Wall -Wextra -Wpedantic)
+
 add_executable(cas_test_ebpf_backend
     unit/test_ebpf_backend.cpp
     ../src/cas/backends/ebpf_backend.cpp
@@ -156,9 +166,21 @@ target_link_libraries(cas_test_ebpf_backend PRIVATE cas_core)
 target_compile_features(cas_test_ebpf_backend PRIVATE cxx_std_17)
 if(AGENTVFS_EBPF)
     target_include_directories(cas_test_ebpf_backend PRIVATE
-        ${LIBBPF_INCLUDE_DIRS} ${CMAKE_CURRENT_BINARY_DIR})
+        ${LIBBPF_INCLUDE_DIRS} ${CMAKE_BINARY_DIR})
     target_link_libraries(cas_test_ebpf_backend PRIVATE ${LIBBPF_LIBRARIES} elf z)
     add_dependencies(cas_test_ebpf_backend cas_bpf_skel)
+
+    add_executable(cas_test_routing_fence_exit
+        system/test_routing_fence_exit.cpp
+        ../src/cas/routing_fence.cpp)
+    target_include_directories(cas_test_routing_fence_exit PRIVATE
+        ../src/cas ${LIBBPF_INCLUDE_DIRS} ${CMAKE_BINARY_DIR})
+    target_link_libraries(cas_test_routing_fence_exit PRIVATE
+        Threads::Threads ${LIBBPF_LIBRARIES} elf z)
+    target_compile_features(cas_test_routing_fence_exit PRIVATE cxx_std_17)
+    target_compile_options(cas_test_routing_fence_exit PRIVATE
+        -Wall -Wextra -Wpedantic)
+    add_dependencies(cas_test_routing_fence_exit cas_routing_fence_skel)
 endif()
 
 add_executable(cas_test_fanotify_backend
@@ -242,4 +264,14 @@ target_compile_features(agentvfs_runtime_counter_fixture PRIVATE cxx_std_17)
 if(NOT MSVC)
     target_compile_options(agentvfs_runtime_counter_fixture PRIVATE -Wall -Wextra -Wpedantic)
 endif()
+
+add_executable(cas_test_fuse_read_buffer
+    unit/test_fuse_read_buffer.cpp
+    ../src/cas/platform/linux/fuse_read_buffer.cpp)
+target_include_directories(cas_test_fuse_read_buffer PRIVATE
+    ../src/cas ../src/cas/platform/linux ${FUSE3_INCLUDE_DIRS})
+target_compile_options(cas_test_fuse_read_buffer PRIVATE
+    ${FUSE3_CFLAGS_OTHER} -Wall -Wextra -Wpedantic)
+target_link_libraries(cas_test_fuse_read_buffer PRIVATE
+    cas_core ${FUSE3_LIBRARIES})
 endif() # LINUX

@@ -121,6 +121,7 @@ set(CAS_CORE_PORTABLE_SOURCES
     src/cas/inode_map.cpp
     src/cas/bootstrap.cpp
     src/cas/branch_router.cpp
+    src/cas/cgroup_watch.cpp
     src/cas/branch_name.cpp
     src/cas/branch_merge.cpp
     src/cas/runtime_state.cpp
@@ -233,7 +234,36 @@ if(AGENTVFS_EBPF)
         COMMAND ${BPFTOOL_BIN} gen skeleton ${CAS_BPF_OBJ} name cas_probe > ${CAS_BPF_SKEL}
         DEPENDS ${CAS_BPF_OBJ}
         COMMENT "Generating cas BPF skeleton")
-    add_custom_target(cas_bpf_skel DEPENDS ${CAS_BPF_SKEL})
+
+    set(FENCE_BPF_SRC ${CMAKE_SOURCE_DIR}/src/cas/bpf/routing_fence.bpf.c)
+    set(FENCE_BPF_OBJ ${CMAKE_CURRENT_BINARY_DIR}/routing_fence.bpf.o)
+    add_custom_command(
+        OUTPUT ${FENCE_BPF_OBJ}
+        COMMAND ${CLANG_BIN}
+                -target bpf ${BPF_BUILD_FLAGS} -D__TARGET_ARCH_x86 -D__bpf__
+                -I ${CMAKE_SOURCE_DIR}/src/cas/bpf
+                -I ${CMAKE_CURRENT_BINARY_DIR}
+                -c ${FENCE_BPF_SRC} -o ${FENCE_BPF_OBJ}
+        DEPENDS ${FENCE_BPF_SRC} ${VMLINUX_H}
+        COMMENT "Compiling routing fence BPF program")
+
+    set(FENCE_BPF_SKEL ${CMAKE_CURRENT_BINARY_DIR}/routing_fence.skel.h)
+    add_custom_command(
+        OUTPUT ${FENCE_BPF_SKEL}
+        COMMAND ${BPFTOOL_BIN} gen skeleton ${FENCE_BPF_OBJ} name routing_fence > ${FENCE_BPF_SKEL}
+        DEPENDS ${FENCE_BPF_OBJ}
+        COMMENT "Generating routing fence BPF skeleton")
+
+    # Keep the complete generated BPF dependency graph under one target so
+    # parallel Make builds cannot schedule the shared vmlinux.h rule twice.
+    add_custom_target(cas_bpf_skeletons
+        DEPENDS ${CAS_BPF_SKEL} ${FENCE_BPF_SKEL})
+
+    # Compatibility target names retained for existing callers.
+    add_custom_target(cas_bpf_skel)
+    add_dependencies(cas_bpf_skel cas_bpf_skeletons)
+    add_custom_target(cas_routing_fence_skel)
+    add_dependencies(cas_routing_fence_skel cas_bpf_skeletons)
 
     # The PUBLIC define lets cas_core's headers compile consistently and
     # downstream targets see the same AGENTVFS_EBPF state. cas_core itself
@@ -261,6 +291,10 @@ if(NOT MSVC)
 endif()
 target_link_libraries(agentvfs PRIVATE
     cas_core ${FUSE3_LIBRARIES} Threads::Threads)
+
+# fd-backed fuse_bufvec primitive (Task 5); wired into cas_read_buf in Task 6.
+target_sources(agentvfs PRIVATE
+    src/cas/platform/linux/fuse_read_buffer.cpp)
 
 if(AGENTVFS_FANOTIFY)
     target_sources(agentvfs PRIVATE src/cas/backends/fanotify_backend.cpp)
@@ -333,8 +367,26 @@ if(AGENTVFS_EBPF)
     target_include_directories(agentvfs PRIVATE
         ${LIBBPF_INCLUDE_DIRS} ${CMAKE_CURRENT_BINARY_DIR})
     target_link_libraries(agentvfs PRIVATE ${LIBBPF_LIBRARIES} elf z)
-    add_dependencies(agentvfs cas_bpf_skel)
+    target_sources(agentvfs PRIVATE src/cas/routing_fence.cpp)
+    add_dependencies(agentvfs cas_bpf_skeletons)
 endif()
+
+add_executable(agentvfs_fuse_io_bench
+    benchmarks/fuse-io/fuse_io_bench.cpp)
+target_compile_features(agentvfs_fuse_io_bench PRIVATE cxx_std_17)
+target_compile_options(agentvfs_fuse_io_bench PRIVATE
+    -Wall -Wextra -Wpedantic)
+
+# In-memory measurement-ceiling daemon: same mount profile as agentvfs,
+# zero per-request work. See benchmarks/fuse-io/null_fuse.cpp.
+add_executable(agentvfs_null_fuse
+    benchmarks/fuse-io/null_fuse.cpp)
+target_compile_features(agentvfs_null_fuse PRIVATE cxx_std_17)
+target_include_directories(agentvfs_null_fuse PRIVATE ${FUSE3_INCLUDE_DIRS})
+target_compile_options(agentvfs_null_fuse PRIVATE
+    ${FUSE3_CFLAGS_OTHER} -Wall -Wextra -Wpedantic)
+target_link_libraries(agentvfs_null_fuse PRIVATE
+    ${FUSE3_LIBRARIES} Threads::Threads)
 endif()
 
 # ── agentvfs daemon (Windows) ───────────────────────────────────────

@@ -3,6 +3,7 @@
 #include "agent_state_service.h"
 #include "branch_name.h"
 #include "cas_op_bits.h"
+#include "cgroup_watch.h"
 #include "daemon.h"
 #include "hash.h"
 #include "policy_installer.h"
@@ -1019,8 +1020,24 @@ std::string dispatch(Daemon& daemon,
         auto br = daemon.branch_by_name(branch_name);
         if (!br) return json_err("unknown branch");
 
-        if (!daemon.router().register_cgroup(cg, br->branch_id))
+        // Watch BEFORE registering: a deletion racing this handler then
+        // fires the eviction after the map insert instead of vanishing
+        // between the two calls.
+        CgroupWatch* watch = daemon.cgroup_watch();
+        bool watched = watch && watch->watch(cg);
+        if (!daemon.router().register_cgroup(cg, br->branch_id)) {
+            if (watched) watch->unwatch(cg);
             return json_err("cgroup path not found or not a directory");
+        }
+        if (watch && !watched) {
+            // Registered but unwatchable (deleted mid-race, inotify watch
+            // limit): fall back to per-resolve leaf revalidation so
+            // delete/recreate detection never silently weakens.
+            daemon.router().set_leaf_revalidation(true);
+            std::fprintf(stderr,
+                "agentvfs: cgroup delete watch failed for %s; "
+                "per-resolve revalidation re-enabled\n", cg.c_str());
+        }
 
         SessionInfo info{};
         info.cgroup_path = cg;
@@ -1052,6 +1069,7 @@ std::string dispatch(Daemon& daemon,
         if (cg.empty()) return json_err("missing cgroup_path");
 
         daemon.router().unregister_cgroup(cg);
+        if (CgroupWatch* watch = daemon.cgroup_watch()) watch->unwatch(cg);
 
         TelemetryRegistry* registry = daemon.registry();
         bool registry_ok = true;

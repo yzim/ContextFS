@@ -27,6 +27,7 @@
 namespace cas {
 
 class TelemetryRegistry;
+class CgroupWatch;
 
 struct FhState {
     std::string path;
@@ -38,6 +39,15 @@ struct FhState {
     bool base_cache_loaded = false;
     std::unique_ptr<WriteBuffer> write_buf;
     bool stale = false;
+    // Linux metadata optimization (Task 4): a read-capable, non-truncating
+    // open retains an fd-backed BlobView so later getattr/read can report
+    // size (and, in Task 6, serve reads) without re-materializing the blob.
+    // Default BlobView is fd=-1 (invalid); macOS/Windows adapters never
+    // touch these fields, so they remain unaffected. BlobView is move-only
+    // and default-constructible, so FhState stays moveable via generated
+    // move ops (no custom destructor/move added here).
+    BlobView blob_view;
+    bool fd_read_eligible = false;
 };
 
 struct BranchMergeResult {
@@ -85,6 +95,11 @@ public:
     void set_policy_installer(PolicyInstaller* pi) { policy_installer_ = pi; }
     PolicyInstaller* policy_installer() { return policy_installer_; }
     const PolicyInstaller* policy_installer() const { return policy_installer_; }
+    // Owned by main.cpp (like the routing fence); null when the cgroup
+    // delete watch could not start. Control handlers add/remove watches
+    // around register/unregister when present.
+    void set_cgroup_watch(CgroupWatch* watch) { cgroup_watch_ = watch; }
+    CgroupWatch* cgroup_watch() { return cgroup_watch_; }
 
     // Cooperative-runtime supervisor + the daemon-coupled snapshot/restore
     // orchestrations. snapshot_runtime/restore_runtime drive the blocking
@@ -230,6 +245,7 @@ private:
     // stop relative to FUSE / control-socket shutdown (commit bf4a933).
     std::unique_ptr<TelemetryRegistry> registry_;
     PolicyInstaller* policy_installer_ = nullptr;
+    CgroupWatch* cgroup_watch_ = nullptr;
 };
 
 } // namespace cas

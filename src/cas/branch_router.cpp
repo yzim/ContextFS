@@ -1,7 +1,6 @@
 #include "branch_router.h"
 #include <cerrno>
 #include <cstdio>
-#include <cstring>
 #include <vector>
 
 #ifdef __linux__
@@ -15,16 +14,25 @@ BranchRouter::BranchRouter() = default;
 BranchRouter::BranchRouter(Hooks hooks)
     : hooks_(std::move(hooks)) {}
 
+void BranchRouter::attach_fence(std::function<uint64_t()> generation,
+                                 std::function<bool(Pid)> track) {
+    hooks_.fence_generation = std::move(generation);
+    hooks_.fence_track = std::move(track);
+}
+
+void BranchRouter::fence_cache_store(Pid pid, uint32_t branch_id,
+                                      uint64_t gen) {
+    // Caller holds mu_.
+    if (pid_fence_cache_.size() >= kFenceCacheCap) pid_fence_cache_.clear();
+    pid_fence_cache_[pid] = {branch_id, gen};
+}
+
 uint64_t BranchRouter::cgroup_id(const std::string& path) const {
     return hooks_.cgroup_id ? hooks_.cgroup_id(path) : cgroup_id_from_path(path);
 }
 
 std::string BranchRouter::proc_cgroup(Pid pid) const {
     return hooks_.read_cgroup ? hooks_.read_cgroup(pid) : read_proc_cgroup(pid);
-}
-
-uint64_t BranchRouter::proc_starttime(Pid pid) const {
-    return hooks_.read_starttime ? hooks_.read_starttime(pid) : read_proc_starttime(pid);
 }
 
 uint64_t BranchRouter::cgroup_id_from_path(const std::string& path) {
@@ -73,45 +81,6 @@ std::string BranchRouter::read_proc_cgroup(Pid pid) {
 #endif
 }
 
-uint64_t BranchRouter::read_proc_starttime(Pid pid) {
-#ifdef __linux__
-    char path[64];
-    std::snprintf(path, sizeof(path), "/proc/%d/stat", (int)pid);
-    int fd = open(path, O_RDONLY);
-    if (fd < 0) return 0;
-    char buf[4096];
-    ssize_t n = read(fd, buf, sizeof(buf) - 1);
-    close(fd);
-    if (n <= 0) return 0;
-    buf[n] = '\0';
-
-    // Format: "PID (comm) state ppid ... <21 more fields> starttime ..."
-    // comm can contain spaces and parens, so scan for the LAST ')' and
-    // parse fields after it. Field numbering from man 5 proc: 1=pid,
-    // 2=comm, 3=state, so after ')' we're at field 3 onwards. We want
-    // field 22 (starttime), i.e. the 20th whitespace-separated token
-    // after the last ')'.
-    const char* rparen = std::strrchr(buf, ')');
-    if (!rparen) return 0;
-    const char* p = rparen + 1;
-    // Skip leading space
-    while (*p == ' ') p++;
-    // Skip fields 3..21 = 19 tokens, landing at field 22
-    for (int i = 0; i < 19; i++) {
-        while (*p && *p != ' ') p++;
-        if (!*p) return 0;
-        p++;
-    }
-    char* end = nullptr;
-    unsigned long long st = std::strtoull(p, &end, 10);
-    if (end == p) return 0;
-    return (uint64_t)st;
-#else
-    (void)pid;
-    return 0;
-#endif
-}
-
 bool BranchRouter::register_cgroup(const std::string& cgroup_path,
                                     uint32_t branch_id) {
     uint64_t cg_id = cgroup_id(cgroup_path);
@@ -123,9 +92,10 @@ bool BranchRouter::register_cgroup(const std::string& cgroup_path,
     }
     std::lock_guard<std::mutex> lk(mu_);
     cgroup_branch_map_[cg_id] = branch_id;
-    // Invalidate pid cache entries that might have stale mappings
+    // Invalidate the path and fence caches; the registration set changed.
     generation_++;
-    pid_cache_.clear();
+    path_branch_cache_.clear();
+    pid_fence_cache_.clear();
     return true;
 }
 
@@ -135,15 +105,19 @@ bool BranchRouter::unregister_cgroup(const std::string& cgroup_path) {
     std::lock_guard<std::mutex> lk(mu_);
     bool erased = cgroup_branch_map_.erase(cg_id) > 0;
     if (erased) generation_++;
-    pid_cache_.clear();
+    path_branch_cache_.clear();
+    pid_fence_cache_.clear();
     return erased;
 }
 
-std::vector<uint64_t> BranchRouter::cgroup_path_ids(const std::string& cgroup_abs_path) const {
+std::vector<uint64_t> BranchRouter::cgroup_path_ids(
+        const std::string& cgroup_abs_path, uint64_t leaf_cgroup_id) const {
     std::vector<uint64_t> ids;
     std::string path = cgroup_abs_path;
+    bool leaf = true;
     while (!path.empty()) {
-        uint64_t id = cgroup_id(path);
+        uint64_t id = leaf ? leaf_cgroup_id : cgroup_id(path);
+        leaf = false;
         if (id != 0) ids.push_back(id);
 
         if (path == "/sys/fs/cgroup") break;
@@ -162,6 +136,18 @@ uint32_t BranchRouter::branch_for_cgroup_ids(const std::vector<uint64_t>& ids) c
     return 0;
 }
 
+void BranchRouter::evict_cgroup_id(uint64_t cg_id) {
+    std::lock_guard<std::mutex> lk(mu_);
+    cgroup_branch_map_.erase(cg_id);
+    generation_++;
+    path_branch_cache_.clear();
+    pid_fence_cache_.clear();
+}
+
+void BranchRouter::set_leaf_revalidation(bool on) {
+    revalidate_leaf_.store(on, std::memory_order_relaxed);
+}
+
 void BranchRouter::invalidate_branch(uint32_t branch_id) {
     std::lock_guard<std::mutex> lk(mu_);
     for (auto it = cgroup_branch_map_.begin(); it != cgroup_branch_map_.end();) {
@@ -169,49 +155,76 @@ void BranchRouter::invalidate_branch(uint32_t branch_id) {
         else ++it;
     }
     generation_++;
-    pid_cache_.clear();
+    path_branch_cache_.clear();
+    pid_fence_cache_.clear();
 }
 
 uint32_t BranchRouter::resolve(Pid pid) {
-    // Read starttime outside the lock — this is a /proc/<pid>/stat read
-    // that can block. Only the cache lookup and write need the mutex.
-    for (;;) {
-        uint64_t now_start = proc_starttime(pid);
-        uint64_t miss_generation = 0;
-
-        {
-            std::lock_guard<std::mutex> lk(mu_);
-            auto it = pid_cache_.find(pid);
-            if (it != pid_cache_.end() && it->second.starttime == now_start && now_start != 0) {
-                return it->second.branch_id;
-            }
-            miss_generation = generation_;
-        }
-
-        // Cache miss: perform all syscalls outside the lock to avoid blocking
-        // other threads during slow I/O (read /proc/<pid>/cgroup + stat()).
-        std::string cg_rel = proc_cgroup(pid);
-        std::string cg_abs;
-        std::vector<uint64_t> cgroup_ids;
-        if (!cg_rel.empty()) {
-            cg_abs = "/sys/fs/cgroup" + cg_rel;
-            cgroup_ids = cgroup_path_ids(cg_abs);
-        }
-
-        // Re-take the lock only for the map lookup and cache write.
+    bool fence_on = static_cast<bool>(hooks_.fence_generation);
+    if (fence_on) {
+        uint64_t gen = hooks_.fence_generation();
         std::lock_guard<std::mutex> lk(mu_);
-        auto cached = pid_cache_.find(pid);
-        if (cached != pid_cache_.end() &&
-            cached->second.starttime == now_start && now_start != 0) {
-            return cached->second.branch_id;
-        }
-        if (generation_ != miss_generation) continue;
-
-        uint32_t branch_id = 0;
-        if (!cgroup_ids.empty()) branch_id = branch_for_cgroup_ids(cgroup_ids);
-        pid_cache_[pid] = {branch_id, now_start};
-        return branch_id;
+        auto it = pid_fence_cache_.find(pid);
+        if (it != pid_fence_cache_.end() && it->second.generation == gen)
+            return it->second.branch_id;
     }
+
+    // Track BEFORE sampling the generation and reading membership: once
+    // tracked, any later migration or exit of this pid bumps the counter,
+    // so an entry stored below can never satisfy the fast path after the
+    // pid's routing changed.
+    bool fence_cache = false;
+    uint64_t fence_gen = 0;
+    if (fence_on && hooks_.fence_track(pid)) {
+        fence_cache = true;
+        fence_gen = hooks_.fence_generation();
+    }
+
+    // Read current membership outside the lock — a procfs read that can
+    // block. Reading fresh on every request is what makes routing strict
+    // under cgroup migration: there is no per-pid state to go stale.
+    std::string cg_rel = proc_cgroup(pid);
+    if (cg_rel.empty()) return 0;
+
+    std::string cg_abs = "/sys/fs/cgroup" + cg_rel;
+    // With the delete watch active the daemon disables per-resolve leaf
+    // revalidation: external rmdir of a registered cgroup arrives as
+    // evict_cgroup_id() instead, and a warm resolve performs no stat.
+    bool check_leaf = revalidate_leaf_.load(std::memory_order_relaxed);
+    uint64_t leaf_cgroup_id = check_leaf ? cgroup_id(cg_abs) : 0;
+    uint64_t miss_generation = 0;
+    {
+        std::lock_guard<std::mutex> lk(mu_);
+        auto it = path_branch_cache_.find(cg_rel);
+        if (it != path_branch_cache_.end()
+                && (!check_leaf
+                    || it->second.leaf_cgroup_id == leaf_cgroup_id)) {
+            if (fence_cache)
+                fence_cache_store(pid, it->second.branch_id, fence_gen);
+            return it->second.branch_id;
+        }
+        miss_generation = generation_;
+    }
+
+    // Memo miss: ancestor walk (one stat() per remaining level) outside the
+    // lock. The leaf id is read here if the hit path skipped it — the walk
+    // needs it, and storing it keeps entries revalidation-ready.
+    if (!check_leaf) leaf_cgroup_id = cgroup_id(cg_abs);
+    std::vector<uint64_t> ids = cgroup_path_ids(cg_abs, leaf_cgroup_id);
+
+    std::lock_guard<std::mutex> lk(mu_);
+    uint32_t branch_id = ids.empty() ? 0 : branch_for_cgroup_ids(ids);
+    // Memoize (and fence-cache) only when no register/unregister raced
+    // the walk — a racing resolve may serve the fresh answer, it just
+    // must not cache across the change.
+    if (generation_ == miss_generation) {
+        if (path_branch_cache_.size() >= kPathCacheCap)
+            path_branch_cache_.clear();
+        path_branch_cache_.insert_or_assign(
+            cg_rel, PathEntry{leaf_cgroup_id, branch_id});
+        if (fence_cache) fence_cache_store(pid, branch_id, fence_gen);
+    }
+    return branch_id;
 }
 
 bool BranchRouter::has_cgroup_for_branch(uint32_t branch_id) const {

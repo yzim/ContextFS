@@ -7,12 +7,15 @@
 #include "commit.h"
 #include "tree_serialize.h"
 #include "fast_control.h"
+#include "fuse_read_buffer.h"
 #include "hash.h"
 #include <algorithm>
 #include <cerrno>
+#include <cstdlib>
 #include <cstring>
 #include <ctime>
 #include <fcntl.h>
+#include <sys/resource.h>
 #include <sys/stat.h>
 #include <sys/statvfs.h>
 
@@ -101,7 +104,21 @@ static int cas_getattr(const char* path, struct stat* st, struct fuse_file_info*
         return 0;
     }
 
-    auto br = resolve_branch(d);
+    // For an fh-based getattr (e.g. fstat), resolve the branch from the handle
+    // — not the caller's current cgroup — to honor file-handle branch pinning.
+    // Do the working-tree lookup AND the handle-size access under the branch's
+    // checkpoint_mu so they observe a consistent snapshot relative to
+    // checkpoint/rollback.
+    std::shared_ptr<FhState> s;
+    std::shared_ptr<BranchContext> br;
+    if (fi) {
+        s = d->get_fh(fi->fh);
+        br = s ? branch_for_fh(d, s) : resolve_branch(d);
+    } else {
+        br = resolve_branch(d);
+    }
+
+    std::unique_lock<std::mutex> lk(br->checkpoint_mu);
     auto entry = br->wt.lookup(path);
     if (!entry) return -ENOENT;
 
@@ -112,25 +129,37 @@ static int cas_getattr(const char* path, struct stat* st, struct fuse_file_info*
         default: return -ENOENT;
     }
 
-    if (entry->kind == EntryKind::Blob) {
-        std::vector<uint8_t> blob;
-        if (d->store().read_blob(entry->hash, blob)) st->st_size = (off_t)blob.size();
-    } else if (entry->kind == EntryKind::Symlink) {
-        std::vector<uint8_t> blob;
-        if (d->store().read_blob(entry->hash, blob)) st->st_size = (off_t)blob.size();
-    }
-
-    if (fi) {
-        auto s = d->get_fh(fi->fh);
-        if (s && s->write_buf) {
-            d->ensure_base_cache(*s);
-            st->st_size = (off_t)s->write_buf->effective_size(s->base_cache.size());
+    if (s && s->write_buf) {
+        // Live handle: derive size from base_size + write-buffer overlay without
+        // materializing the base payload (ensure_base_cache deliberately NOT
+        // called — base_size is already populated at open time). The lock
+        // above guards the read against concurrent checkpoint flushes.
+        st->st_size = static_cast<off_t>(s->write_buf->effective_size(s->base_size));
+    } else if (fi) {
+        // fi was non-null but the handle was stale/absent: fall back to the
+        // committed entry's blob size (header-validated on first sight, then
+        // served from the immutable-size cache), so a corrupt blob still
+        // surfaces EIO instead of size 0.
+        if (entry->hash != ZERO_HASH) {
+            uint64_t payload_size = 0;
+            int err = d->store().blob_payload_size(entry->hash, payload_size);
+            if (err != 0) return -err;
+            st->st_size = static_cast<off_t>(payload_size);
         }
     } else {
-        // Kernel may call GETATTR without a fh (e.g. some fstat() paths).
-        // Surface read-your-writes by consulting any open dirty fh for path.
+        // Path-only GETATTR (e.g. some stat() paths). Blob sizes are
+        // immutable per content hash, so a warm stat performs no object
+        // open — and no disk I/O under checkpoint_mu; corrupt blobs report
+        // EIO. Then consult any open dirty fh for the path
+        // (read-your-writes, correctness contract 5).
+        if (entry->hash != ZERO_HASH) {
+            uint64_t payload_size = 0;
+            int err = d->store().blob_payload_size(entry->hash, payload_size);
+            if (err != 0) return -err;
+            st->st_size = static_cast<off_t>(payload_size);
+        }
         int64_t eff = d->dirty_fh_size_for_path(path, br->branch_id);
-        if (eff >= 0) st->st_size = (off_t)eff;
+        if (eff >= 0) st->st_size = static_cast<off_t>(eff);
     }
 
     st->st_nlink = 1;
@@ -166,13 +195,14 @@ static int cas_open(const char* path, struct fuse_file_info* fi) {
         Hash base_blob = entry->hash;
         uint64_t base_size = 0;
         bool truncated = (fi->flags & O_TRUNC) != 0;
+        BlobView view;
         if (truncated) {
             base_blob = d->store().write_blob(nullptr, 0);
             br->wt.insert(path, {EntryKind::Blob, base_blob, entry->mode});
-        } else {
-            std::vector<uint8_t> blob;
-            if (base_blob != ZERO_HASH && d->store().read_blob(base_blob, blob))
-                base_size = blob.size();
+        } else if (base_blob != ZERO_HASH) {
+            int blob_error = d->store().open_blob(base_blob, view);
+            if (blob_error != 0) return -blob_error;
+            base_size = view.payload_size();
         }
 
         auto state = std::make_unique<FhState>();
@@ -183,6 +213,17 @@ static int cas_open(const char* path, struct fuse_file_info* fi) {
         state->base_size = base_size;
         if (truncated) state->base_cache_loaded = true;  // known empty
         state->write_buf = std::make_unique<WriteBuffer>(base_blob, base_size);
+        // Retain the fd-backed view only for read-capable, non-truncating
+        // opens. Create/O_TRUNC handles stay ineligible (fd_read_eligible
+        // remains false); the default BlobView is already invalid.
+        // Eligibility also requires a valid view: a ZERO_HASH entry (failed
+        // write_blob) has no object to open, and its reads must fall through
+        // to the overlay path, which serves it as an empty file — matching
+        // getattr — rather than EIO from an invalid fd.
+        int accmode = fi->flags & O_ACCMODE;
+        state->fd_read_eligible =
+            !truncated && accmode != O_WRONLY && static_cast<bool>(view);
+        if (state->fd_read_eligible) state->blob_view = std::move(view);
         fi->fh = d->allocate_fh(std::move(state));
     }
 
@@ -242,6 +283,9 @@ static int cas_write(const char*, const char* buf, size_t size, off_t offset,
     auto br = branch_for_fh(d, s);
     std::lock_guard<std::mutex> lk(br->checkpoint_mu);
     if (s->stale) return -ESTALE;
+    // First mutation on this handle: once it mutates it must never again serve
+    // reads from the immutable blob fd (which would miss in-flight writes).
+    s->fd_read_eligible = false;
     s->write_buf->write((uint64_t)offset, (const uint8_t*)buf, size);
     return (int)size;
 }
@@ -322,6 +366,8 @@ static int cas_truncate(const char* path, off_t length, struct fuse_file_info* f
         auto br = branch_for_fh(d, s);
         std::lock_guard<std::mutex> lk(br->checkpoint_mu);
         if (s->stale) return -ESTALE;
+        // Same mutation rule as cas_write: truncate forfeits fd-backed reads.
+        s->fd_read_eligible = false;
         s->write_buf->truncate((uint64_t)length);
         return 0;
     }
@@ -553,11 +599,72 @@ static int cas_ioctl(const char* path, int cmd, void* arg,
     return 0;
 }
 
+// Memory-backed read fallback for mutated handles (those that lost
+// fd_read_eligibility). Allocates a fuse_bufvec whose single buffer is a
+// malloc'd region filled via write_buf->read (the same overlay logic cas_read
+// uses). libfuse copies `count` bytes out of the `size`-byte allocation.
+static int make_overlay_read_buf(Daemon* d, const std::shared_ptr<FhState>& s,
+                                 size_t size, off_t offset,
+                                 struct fuse_bufvec** out) {
+    if (!out) return -EINVAL;
+    *out = nullptr;
+    if (offset < 0) return -EINVAL;
+    auto* result = static_cast<struct fuse_bufvec*>(
+        std::malloc(sizeof(struct fuse_bufvec)));
+    if (!result) return -ENOMEM;
+    void* memory = size ? std::malloc(size) : nullptr;
+    if (size && !memory) {
+        std::free(result);
+        return -ENOMEM;
+    }
+    d->ensure_base_cache(*s);
+    size_t count = s->write_buf->read(
+        static_cast<uint64_t>(offset), static_cast<uint8_t*>(memory),
+        size, s->base_cache);
+    std::memset(result, 0, sizeof(*result));
+    result->count = 1;
+    result->buf[0].size = count;
+    result->buf[0].fd = -1;
+    result->buf[0].mem = memory;
+    *out = result;
+    return 0;
+}
+
+// FUSE read_buf op: serves zero-copy (fd-backed) reads for clean handles and
+// falls back to the memory-backed overlay for handles that have been written
+// or truncated. fd_read_eligible flips to false on the first mutation, so once
+// a handle mutates it always reads through the overlay (which honors the
+// post-write content, never the stale immutable blob fd).
+//
+// fd lifetime invariant: the fd placed in the returned bufvec is consumed by
+// libfuse (spliced into the read reply) AFTER this callback returns — outside
+// checkpoint_mu and after the local FhState shared_ptr is dropped. That is
+// safe only because the kernel holds the file reference for the duration of
+// read(2), so it cannot dispatch RELEASE for this fh while a READ is in
+// flight, and Daemon::release_fh is the only place the FhState (and with it
+// the retained blob_view fd) is dropped. Rollback marks handles stale but
+// never closes their fds. Never add a daemon-side path that closes or
+// replaces blob_view outside FhState destruction at release.
+static int cas_read_buf(const char*, struct fuse_bufvec** out, size_t size,
+                        off_t offset, struct fuse_file_info* fi) {
+    Daemon* d = get_daemon();
+    auto s = d->get_fh(fi->fh);
+    if (!s) return -EBADF;
+    auto br = branch_for_fh(d, s);
+    std::lock_guard<std::mutex> lk(br->checkpoint_mu);
+    if (s->stale) return -ESTALE;
+    if (offset < 0) return -EINVAL;
+    if (s->fd_read_eligible)
+        return make_fd_read_buf(s->blob_view, size, offset, out);
+    return make_overlay_read_buf(d, s, size, offset, out);
+}
+
 static void fill_fuse_ops(struct fuse_operations& ops) {
     ops.getattr   = cas_getattr;
     ops.open      = cas_open;
     ops.create    = cas_create;
     ops.read      = cas_read;
+    ops.read_buf  = cas_read_buf;
     ops.write     = cas_write;
     ops.flush     = cas_flush;
     ops.fsync     = cas_fsync;
@@ -579,6 +686,17 @@ static void fill_fuse_ops(struct fuse_operations& ops) {
 }
 
 int run_filesystem(Daemon& daemon, const MountOptions& opts) {
+    // Every read-capable, non-truncating open handle now retains an object
+    // fd (BlobView) until release, so the per-daemon fd budget can grow with
+    // the number of concurrent readers. Raise RLIMIT_NOFILE to its hard
+    // ceiling at startup so large fan-out workloads don't hit EMFILE.
+    struct rlimit nofile {};
+    if (getrlimit(RLIMIT_NOFILE, &nofile) == 0 &&
+        nofile.rlim_cur < nofile.rlim_max) {
+        nofile.rlim_cur = nofile.rlim_max;
+        (void)setrlimit(RLIMIT_NOFILE, &nofile);
+    }
+
     struct fuse_operations ops {};
     fill_fuse_ops(ops);
 

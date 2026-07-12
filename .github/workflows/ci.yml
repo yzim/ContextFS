@@ -34,6 +34,8 @@ jobs:
           run_test ./build/tests/cas_test_branch_merge_commit
           run_test ./build/tests/cas_test_branch_merge_daemon
           run_test ./build/tests/cas_test_branch_persistence
+          run_test ./build/tests/cas_test_branch_router
+          run_test ./build/tests/cas_test_cgroup_watch
           run_test ./build/tests/cas_test_blake3_simd
           run_test ./build/tests/cas_test_telemetry_event
           run_test ./build/tests/cas_test_telemetry_registry
@@ -67,6 +69,8 @@ jobs:
           ./build/tests/cas_test_branch_context
           ./build/tests/cas_test_branch_merge
           ./build/tests/cas_test_branch_merge_commit
+          ./build/tests/cas_test_branch_router
+          ./build/tests/cas_test_cgroup_watch
           ./build/tests/cas_test_blake3_simd
           ./build/tests/cas_test_telemetry_event
           ./build/tests/cas_test_telemetry_registry
@@ -90,6 +94,8 @@ jobs:
           .\build\tests\Release\cas_test_write_buffer.exe
           .\build\tests\Release\cas_test_branch_context.exe
           .\build\tests\Release\cas_test_branch_merge.exe
+          .\build\tests\Release\cas_test_branch_router.exe
+          .\build\tests\Release\cas_test_cgroup_watch.exe
           .\build\tests\Release\cas_test_blake3_simd.exe
           .\build\tests\Release\cas_test_telemetry_event.exe
           .\build\tests\Release\cas_test_win_helpers.exe

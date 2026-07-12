@@ -11,8 +11,9 @@ SRC="$ROOT/src"
 MNT="$ROOT/mnt"
 STORE="$ROOT/store"
 SOCK="$ROOT/control.sock"
-BIN="$(pwd)/build/agentvfs"
+BIN="${AGENTVFS_BIN:-$(pwd)/build/agentvfs}"
 CTL="$(pwd)/build/agentvfs-ctl"
+REQUIRE_ROUTING_FENCE="${AGENTVFS_REQUIRE_ROUTING_FENCE:-0}"
 
 PASS=0
 FAIL=0
@@ -24,7 +25,7 @@ CG_BASE="/sys/fs/cgroup/agentvfs-multi-$$"
 
 start_daemon() {
     "$BIN" --source "$SRC" --mountpoint "$MNT" --store "$STORE" \
-           --control-sock "$SOCK" -f -s &
+           --control-sock "$SOCK" -f -s 2>"$ROOT/daemon.err" &
     DAEMON_PID=$!
     for _ in $(seq 1 50); do
         if [[ -S "$SOCK" ]] && mountpoint -q "$MNT"; then return 0; fi
@@ -55,6 +56,10 @@ trap cleanup EXIT
 
 # ── Preflight ─────────────────────────────────────────────────────
 if [[ $EUID -ne 0 ]]; then
+    if [[ "$REQUIRE_ROUTING_FENCE" == "1" ]]; then
+        echo "FAIL test_cas_multi_branch: needs root for cgroup creation"
+        exit 1
+    fi
     echo "SKIP test_cas_multi_branch: needs root for cgroup creation"
     exit 0
 fi
@@ -70,12 +75,32 @@ done
 echo "shared-v0" > "$SRC/shared.txt"
 
 # Create cgroups — one per branch.
-mkdir -p "$CG_BASE"
+if ! mkdir -p "$CG_BASE"; then
+    if [[ "$REQUIRE_ROUTING_FENCE" == "1" ]]; then
+        echo "FAIL test_cas_multi_branch: cgroup v2 unavailable"
+        exit 1
+    fi
+    echo "SKIP test_cas_multi_branch: cgroup v2 unavailable"
+    exit 0
+fi
 for b in $(seq 1 $NUM_BRANCHES); do
-    mkdir "$CG_BASE/br$b" || { echo "SKIP: cgroup v2 unavailable"; exit 0; }
+    mkdir "$CG_BASE/br$b" || {
+        if [[ "$REQUIRE_ROUTING_FENCE" == "1" ]]; then
+            echo "FAIL test_cas_multi_branch: cgroup v2 unavailable"
+            exit 1
+        fi
+        echo "SKIP: cgroup v2 unavailable"
+        exit 0
+    }
 done
 
 start_daemon || { echo "FAIL: daemon not ready"; exit 1; }
+if [[ "$REQUIRE_ROUTING_FENCE" == "1" ]] &&
+   ! grep -q "agentvfs: routing fence active" "$ROOT/daemon.err"; then
+    echo "FAIL test_cas_multi_branch: routing fence did not become active"
+    cat "$ROOT/daemon.err"
+    exit 1
+fi
 
 # ── 1. Create 10 branches ────────────────────────────────────────
 echo "=== Creating $NUM_BRANCHES branches ==="
@@ -105,7 +130,53 @@ for b in $(seq 1 $NUM_BRANCHES); do
         && pass "register cg br$b" || fail "register cg br$b"
 done
 
-# ── 3. Per-branch: write unique files + 10 checkpoints ───────────
+# ── 3. Same-path branch read coverage (fd-backed reads) ──────────
+echo "=== Same-path branch read coverage (shared-large.bin) ==="
+# Two branches write distinct 256-KiB patterns to the same path; each then
+# reads back its own content. This proves open-time routing selects different
+# immutable object fds for the same pathname.
+for b in 1 2; do
+    (
+        echo $BASHPID > "$CG_BASE/br$b/cgroup.procs"
+        python3 - "$MNT/shared-large.bin" "$b" <<'PY'
+import pathlib, sys
+pathlib.Path(sys.argv[1]).write_bytes(bytes([int(sys.argv[2])]) * (256 * 1024))
+PY
+    )
+done
+for b in 1 2; do
+    (
+        echo $BASHPID > "$CG_BASE/br$b/cgroup.procs"
+        python3 - "$MNT/shared-large.bin" "$b" <<'PY'
+import pathlib, sys
+data = pathlib.Path(sys.argv[1]).read_bytes()
+assert data == bytes([int(sys.argv[2])]) * (256 * 1024)
+PY
+    ) && pass "br$b shared-large.bin own bytes" || fail "br$b shared-large.bin mismatch"
+done
+
+# Handle pinning: an fd opened in br1 keeps serving br1's bytes even after the
+# caller's cgroup is moved to br2, while a fresh open in br2 reads br2's bytes.
+(
+    echo $BASHPID > "$CG_BASE/br1/cgroup.procs"
+    python3 - "$MNT/shared-large.bin" "$CG_BASE/br2/cgroup.procs" <<'PY'
+import os, pathlib, sys
+path, next_cgroup = sys.argv[1:]
+fd = os.open(path, os.O_RDONLY)
+try:
+    assert os.fstat(fd).st_size == 256 * 1024
+    assert os.pread(fd, 4096, 0) == bytes([1]) * 4096
+    pathlib.Path(next_cgroup).write_text(str(os.getpid()), encoding="ascii")
+    assert os.fstat(fd).st_size == 256 * 1024
+    assert os.pread(fd, 4096, 0) == bytes([1]) * 4096
+    with open(path, "rb") as current:
+        assert current.read(4096) == bytes([2]) * 4096
+finally:
+    os.close(fd)
+PY
+) && pass "handle pinned to open-time branch" || fail "handle pinning across cgroup switch"
+
+# ── 4. Per-branch: write unique files + 10 checkpoints ───────────
 echo "=== Writing files and creating checkpoints ==="
 
 # COMMITS[b,cp] stores commit hashes.  Bash doesn't have 2D arrays,
@@ -133,7 +204,7 @@ for b in $(seq 1 $NUM_BRANCHES); do
     done
 done
 
-# ── 4. Verify isolation: each branch sees only its own files ──────
+# ── 5. Verify isolation: each branch sees only its own files ──────
 echo "=== Verifying branch isolation ==="
 for b in $(seq 1 $NUM_BRANCHES); do
     # Read from this branch's cgroup — should see its own latest data.
@@ -158,7 +229,7 @@ for b in $(seq 1 $NUM_BRANCHES); do
         || fail "br$b sees br$OTHER data: '$GOT'"
 done
 
-# ── 5. Rollback tests per branch ─────────────────────────────────
+# ── 6. Rollback tests per branch ─────────────────────────────────
 echo "=== Rollback tests ==="
 
 # Roll each branch back to cp5, verify state.
@@ -184,7 +255,7 @@ for b in $(seq 1 $NUM_BRANCHES); do
     done
 done
 
-# ── 6. Roll back to cp1, then forward to cp10 by hash ────────────
+# ── 7. Roll back to cp1, then forward to cp10 by hash ────────────
 echo "=== Rollback to cp1, then forward to cp10 ==="
 for b in $(seq 1 $NUM_BRANCHES); do
     RESP="$("$CTL" --sock "$SOCK" --json rollback "br${b}-cp1" --branch "br$b")"
@@ -214,7 +285,7 @@ for b in $(seq 1 $NUM_BRANCHES); do
         && pass "br$b data restored to cp10" || fail "br$b data after forward: '$GOT'"
 done
 
-# ── 7. Cross-branch isolation after rollbacks ─────────────────────
+# ── 8. Cross-branch isolation after rollbacks ─────────────────────
 echo "=== Cross-branch isolation after rollbacks ==="
 # Roll odd branches to cp3, even branches stay at cp10.
 for b in $(seq 1 2 $NUM_BRANCHES); do
@@ -232,7 +303,7 @@ for b in $(seq 1 $NUM_BRANCHES); do
         && pass "br$b at expected state" || fail "br$b: expected '$EXPECT', got '$GOT'"
 done
 
-# ── 8. Main branch is untouched ──────────────────────────────────
+# ── 9. Main branch is untouched ──────────────────────────────────
 echo "=== Main branch unaffected ==="
 GOT="$(cat "$MNT/shared.txt")"
 [[ "$GOT" == "shared-v0" ]] \
@@ -244,7 +315,7 @@ for b in $(seq 1 $NUM_BRANCHES); do
         && pass "main sees base br$b" || fail "main br$b data: '$GOT'"
 done
 
-# ── 9. Cleanup: unregister + delete branches ─────────────────────
+# ── 10. Cleanup: unregister + delete branches ────────────────────
 echo "=== Cleanup ==="
 for b in $(seq 1 $NUM_BRANCHES); do
     "$CTL" --sock "$SOCK" session unregister --cgroup "$CG_BASE/br$b" >/dev/null \

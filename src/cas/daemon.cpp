@@ -195,6 +195,11 @@ std::shared_ptr<FhState> Daemon::get_fh(uint64_t fh) {
     return (it == fh_table_.end()) ? nullptr : it->second;
 }
 
+// Must only run for FUSE RELEASE: dropping the FhState closes its retained
+// blob_view fd, which in-flight fd-backed reads may still splice from after
+// their callback returns (see cas_read_buf in the Linux adapter). The kernel
+// guarantees RELEASE is not dispatched while a READ is in flight; daemon-side
+// eviction of fh_table_ entries would break that guarantee.
 void Daemon::release_fh(uint64_t fh) {
     std::lock_guard<std::mutex> lk(fh_table_mu_);
     fh_table_.erase(fh);

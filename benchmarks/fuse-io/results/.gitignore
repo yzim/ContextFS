@@ -1,0 +1,16 @@
+*
+!.gitignore
+!accepted-baseline.json
+!accepted-optimized.json
+!baseline.md
+!report.md
+!profile.txt
+!accepted-routing.json
+!report-routing.md
+!profile-routing.txt
+!profile-fence.txt
+!accepted-guardrail.json
+!report-guardrail.md
+!ceiling-probe.md
+!accepted-sizecache.json
+!report-sizecache.md

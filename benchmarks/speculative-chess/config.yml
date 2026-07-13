@@ -1,0 +1,19 @@
+max_plies: 50
+k: 3
+k_launch: 3
+candidate_timeout_s: 120
+actor:
+  model: "gpt-5"
+  base_url_env: "CHESS_ACTOR_BASE_URL"
+  api_key_env: "CHESS_ACTOR_API_KEY"
+  timeout_s: 120
+  retries: 3
+speculator:
+  model: "gpt-5-mini"
+  base_url_env: "CHESS_SPEC_BASE_URL"
+  api_key_env: "CHESS_SPEC_API_KEY"
+  timeout_s: 30
+  retries: 2
+paths:
+  agentvfs_bin: "../../build/agentvfs"
+  ctl_bin: "../../build/agentvfs-ctl"

@@ -297,10 +297,15 @@ bool ObjectStore::for_each_object(
             Hash h;
             // Skip stray non-object filenames (length != 64 hex chars).
             if (name.size() != 64 || !hex_to_hash(name.c_str(), h)) continue;
-            struct stat st;
             // Per-file stat failure (e.g. racing rename) skips the file;
             // only directory-enumeration failure aborts with an error.
+#ifdef _WIN32
+            struct _stat64 st;
+            if (::_wstat64(obj->path().c_str(), &st) != 0) continue;
+#else
+            struct stat st;
             if (::stat(obj->path().c_str(), &st) != 0) continue;
+#endif
             cb(h, static_cast<uint64_t>(st.st_size),
                static_cast<int64_t>(st.st_mtime));
         }

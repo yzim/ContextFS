@@ -1,6 +1,7 @@
 #include "agent_state_service.h"
 
 #include "hash.h"
+#include "posix_compat.h"
 
 #include <algorithm>
 #include <cctype>
@@ -8,14 +9,24 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
-#include <fcntl.h>
+#include <filesystem>
+#include <random>
 #include <string>
-#include <sys/stat.h>
-#include <sys/types.h>
-#include <unistd.h>
 #include <vector>
 
+#ifdef _WIN32
+#  ifndef WIN32_LEAN_AND_MEAN
+#    define WIN32_LEAN_AND_MEAN
+#  endif
+#  ifndef NOMINMAX
+#    define NOMINMAX
+#  endif
+#  include <windows.h>
+#endif
+
 namespace cas {
+
+namespace fs = std::filesystem;
 
 namespace {
 
@@ -23,19 +34,19 @@ namespace {
 // success or EEXIST. Used to materialize the <store>/state/latest/<agent_id>/
 // hierarchy one component at a time.
 bool mkdir_one(const std::string& path, std::string& error) {
-    if (::mkdir(path.c_str(), 0777) == 0) return true;
-    if (errno == EEXIST) {
-        struct stat st;
-        if (::stat(path.c_str(), &st) == 0 && S_ISDIR(st.st_mode)) {
-            return true;
-        }
-        error = "mkdir(" + path + ") found a non-directory";
-        return false;
-    }
-    error = std::string("mkdir(") + path + ") failed: " + std::strerror(errno);
+    std::error_code ec;
+    if (fs::create_directory(path, ec) || !ec) return true;
+
+    // Match mkdir()+stat()'s prior behavior for an existing directory,
+    // including a symlink/junction that resolves to one.
+    std::error_code type_ec;
+    if (fs::is_directory(path, type_ec) && !type_ec) return true;
+
+    error = "create_directory(" + path + ") failed: " + ec.message();
     return false;
 }
 
+#ifndef _WIN32
 // fsync an open directory file descriptor. Used to make the rename of a latest
 // ref durable on the parent directory.
 bool fsync_dir(int fd) {
@@ -45,8 +56,17 @@ bool fsync_dir(int fd) {
     }
     return true;
 }
+#endif
 
 bool fsync_dir_at(const std::string& dir_path, std::string& error) {
+#ifdef _WIN32
+    // Windows does not expose POSIX directory descriptors. The latest-ref file
+    // itself is committed before MoveFileExW publishes it, and the move uses
+    // MOVEFILE_WRITE_THROUGH below.
+    (void)dir_path;
+    (void)error;
+    return true;
+#else
     int fd = ::open(dir_path.c_str(), O_RDONLY | O_DIRECTORY);
     if (fd < 0) {
         error = std::string("open dir ") + dir_path + " failed: " +
@@ -61,6 +81,7 @@ bool fsync_dir_at(const std::string& dir_path, std::string& error) {
         return false;
     }
     return true;
+#endif
 }
 
 bool ensure_child_dir_durable(const std::string& parent,
@@ -69,6 +90,66 @@ bool ensure_child_dir_durable(const std::string& parent,
     std::string child = parent + "/" + child_name;
     if (!mkdir_one(child, error)) return false;
     return fsync_dir_at(parent, error);
+}
+
+int create_latest_ref_temp(const std::string& agent_dir,
+                           const std::string& branch,
+                           std::string& tmp_path,
+                           std::string& error) {
+#ifdef _WIN32
+    static thread_local std::mt19937_64 rng(std::random_device{}());
+    for (unsigned attempt = 0; attempt < 128; ++attempt) {
+        char name[128];
+        std::snprintf(name, sizeof(name), ".ref-%s-%016llx",
+                      branch.c_str(),
+                      static_cast<unsigned long long>(rng()));
+        tmp_path = agent_dir + "/" + name;
+        int fd = ::open(tmp_path.c_str(),
+                        O_WRONLY | O_CREAT | O_EXCL | O_BINARY, 0600);
+        if (fd >= 0) return fd;
+        if (errno != EEXIST) break;
+    }
+    error = std::string("create latest-ref temp file failed: ") +
+            std::strerror(errno);
+    return -1;
+#else
+    std::string tmpl_str = agent_dir + "/.ref-" + branch + "-XXXXXX";
+    std::vector<char> tmpl(tmpl_str.begin(), tmpl_str.end());
+    tmpl.push_back('\0');
+    int fd = ::mkstemp(tmpl.data());
+    if (fd < 0) {
+        error = std::string("mkstemp failed: ") + std::strerror(errno);
+        return -1;
+    }
+    tmp_path = tmpl.data();
+    return fd;
+#endif
+}
+
+void remove_temp(const std::string& path) {
+    std::error_code ec;
+    fs::remove(path, ec);
+}
+
+bool replace_latest_ref(const std::string& tmp_path,
+                        const std::string& target,
+                        std::string& error) {
+#ifdef _WIN32
+    fs::path tmp_native(tmp_path);
+    fs::path target_native(target);
+    if (::MoveFileExW(tmp_native.c_str(), target_native.c_str(),
+                      MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
+        return true;
+    }
+    error = "replace latest ref failed: Win32 error " +
+            std::to_string(static_cast<unsigned long>(::GetLastError()));
+    return false;
+#else
+    if (::rename(tmp_path.c_str(), target.c_str()) == 0) return true;
+    error = std::string("rename latest ref failed: ") +
+            std::strerror(errno);
+    return false;
+#endif
 }
 
 bool parse_optional_hash(const std::string& value,
@@ -85,8 +166,8 @@ bool parse_optional_hash(const std::string& value,
 }
 
 // Atomically publishes the latest ref for an agent+branch. Writes the state id
-// to a temp file in the ref's parent directory, fsyncs the file, renames it
-// into place, then fsyncs the parent directory so the rename survives a crash.
+// to a temp file in the ref's parent directory, commits the file, then replaces
+// the target with the platform's durable rename operation.
 bool publish_latest_ref(const std::string& store_root,
                         const std::string& agent_id,
                         const std::string& branch,
@@ -102,29 +183,23 @@ bool publish_latest_ref(const std::string& store_root,
 
     std::string target = agent_dir + "/" + branch;
 
-    // Create a uniquely-named temp file inside the same directory so the rename
-    // is guaranteed atomic on the same filesystem. Build the template in a
-    // named string first so the vector's begin/end iterators refer to the SAME
-    // object (two separate temporaries would yield iterators into different
-    // strings and the distance — i.e. the vector size — would be undefined).
-    std::string tmpl_str = agent_dir + "/.ref-" + branch + "-XXXXXX";
-    std::vector<char> tmpl(tmpl_str.begin(), tmpl_str.end());
-    tmpl.push_back('\0');
-    int fd = ::mkstemp(tmpl.data());
-    if (fd < 0) {
-        error = std::string("mkstemp failed: ") + std::strerror(errno);
-        return false;
-    }
-    std::string tmp_path = tmpl.data();
+    // Create a uniquely-named temp file inside the same directory so publishing
+    // remains an atomic same-filesystem replacement on every platform.
+    std::string tmp_path;
+    int fd = create_latest_ref_temp(agent_dir, branch, tmp_path, error);
+    if (fd < 0) return false;
 
     const char* data = state_id_hex.c_str();
     size_t remaining = state_id_hex.size();
     ssize_t n = 0;
     bool write_ok = true;
+    int io_error = 0;
     while (remaining > 0) {
-        n = ::write(fd, data + (state_id_hex.size() - remaining), remaining);
+        n = ::write(fd, data + (state_id_hex.size() - remaining),
+                    static_cast<unsigned int>(remaining));
         if (n < 0) {
             if (errno == EINTR) continue;
+            io_error = errno;
             write_ok = false;
             break;
         }
@@ -133,6 +208,7 @@ bool publish_latest_ref(const std::string& store_root,
     if (write_ok) {
         while (::fsync(fd) != 0) {
             if (errno != EINTR) {
+                io_error = errno;
                 write_ok = false;
                 break;
             }
@@ -141,22 +217,19 @@ bool publish_latest_ref(const std::string& store_root,
     ::close(fd);
 
     if (!write_ok) {
-        ::unlink(tmp_path.c_str());
+        remove_temp(tmp_path);
         error = std::string("write/fsync latest ref failed: ") +
-                std::strerror(errno);
+                std::strerror(io_error);
         return false;
     }
 
-    if (::rename(tmp_path.c_str(), target.c_str()) != 0) {
-        ::unlink(tmp_path.c_str());
-        error = std::string("rename latest ref failed: ") +
-                std::strerror(errno);
+    if (!replace_latest_ref(tmp_path, target, error)) {
+        remove_temp(tmp_path);
         return false;
     }
 
-    // Make the rename durable on the parent directory. State blobs are already
-    // fsync'd by write_agent_state_record; the ref file's parent dir fsync is
-    // the last step that binds the ref to the durable state.
+    // POSIX needs a parent-directory barrier after rename. Windows completes
+    // that durability step inside MoveFileExW(MOVEFILE_WRITE_THROUGH) above.
     if (!fsync_dir_at(agent_dir, error)) return false;
 
     return true;

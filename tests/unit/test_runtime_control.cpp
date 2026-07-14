@@ -102,6 +102,10 @@ static pid_t spawn_sleeper() {
     pid_t pid = fork();
     REQUIRE(pid >= 0);
     if (pid == 0) {
+        // Test helpers never write output. Do not keep CTest's capture pipes
+        // alive if the parent exits early on a failed assertion.
+        close(STDOUT_FILENO);
+        close(STDERR_FILENO);
         // Child: own process group, clean handler for SIGTERM, then pause.
         setpgid(0, 0);
         struct sigaction sa;
@@ -192,6 +196,8 @@ static bool is_hex_commit(const std::string& s) {
     return true;
 }
 
+#if defined(__linux__)
+
 static PeerCredentials peer_for_pid(pid_t pid) {
     PeerCredentials peer;
     peer.available = true;
@@ -208,9 +214,12 @@ static std::pair<pid_t, pid_t> spawn_launcher_with_child() {
     REQUIRE(launcher >= 0);
     if (launcher == 0) {
         close(pipefd[0]);
+        close(STDOUT_FILENO);
+        close(STDERR_FILENO);
         pid_t child = fork();
         if (child < 0) _exit(127);
         if (child == 0) {
+            close(pipefd[1]);
             setpgid(0, 0);
             struct sigaction sa;
             sa.sa_handler = [](int) { _exit(0); };
@@ -247,6 +256,8 @@ static std::pair<pid_t, pid_t> spawn_launcher_with_child() {
     REQUIRE(child > 0);
     return {launcher, static_cast<pid_t>(child)};
 }
+
+#endif
 
 // ---------------------------------------------------------------------------
 // Snapshot rendezvous helper. Drives runtime.snapshot + runtime.boundary +
@@ -715,6 +726,8 @@ static void test_runtime_control_rejects_spoofed_tokens_and_invalid_registration
     std::printf("  PASS test_runtime_control_rejects_spoofed_tokens_and_invalid_registration\n");
 }
 
+#if defined(__linux__)
+
 static void test_runtime_control_rejects_peer_spoofing() {
     TestDaemon env("peers");
     Daemon& d = env.daemon;
@@ -817,6 +830,8 @@ static void test_runtime_control_rejects_peer_spoofing() {
     std::printf("  PASS test_runtime_control_rejects_peer_spoofing\n");
 }
 
+#endif
+
 int main() {
     std::printf("test_runtime_control:\n");
     test_create_and_status_generation_one();
@@ -824,7 +839,11 @@ int main() {
     test_restore_rolls_back_and_terminates_after_generation_ready();
     test_generation_ready_rejects_wrong_token_at_daemon_level();
     test_runtime_control_rejects_spoofed_tokens_and_invalid_registration();
+#if defined(__linux__)
     test_runtime_control_rejects_peer_spoofing();
+#else
+    std::printf("  SKIP test_runtime_control_rejects_peer_spoofing (Linux-only)\n");
+#endif
     std::printf("PASS test_runtime_control\n");
     return 0;
 }

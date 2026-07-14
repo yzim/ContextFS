@@ -348,6 +348,11 @@ foreach(test_target IN LISTS AGENTVFS_STANDALONE_TEST_TARGETS)
     endif()
 endforeach()
 
+if(TARGET cas_test_runtime_control)
+    # This test coordinates helper processes and several bounded rendezvous.
+    # Keep an assertion failure or leaked helper from stalling an entire CI job.
+    set_tests_properties(cas_test_runtime_control PROPERTIES TIMEOUT 60)
+endif()
 if(TARGET cas_test_cgroup_watch_kernfs)
     set_tests_properties(cas_test_cgroup_watch_kernfs PROPERTIES
         SKIP_RETURN_CODE 77)

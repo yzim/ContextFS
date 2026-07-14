@@ -420,6 +420,84 @@ static void test_durable_append_fsyncs_payload_and_state() {
     remove_dir_recursive(root);
 }
 
+// The persisted dependency list is the same stable, de-duplicated set used
+// for durable publication: explicit request dependencies first, followed by a
+// derived payload_ref only when it was not already explicit.
+static void test_append_persists_effective_dependency_set() {
+    std::string root = make_tmp_dir();
+    ObjectStore store(root);
+    REQUIRE(store.init_layout());
+    AgentStateService svc(store);
+
+    Hash explicit_dep = store.write_blob(
+        std::vector<uint8_t>{'e','x','p','l','i','c','i','t'});
+    Hash payload_hash = store.write_blob(
+        std::vector<uint8_t>{'p','a','y','l','o','a','d'});
+    REQUIRE(explicit_dep != ZERO_HASH);
+    REQUIRE(payload_hash != ZERO_HASH);
+
+    AgentStateRecord base = base_session_record();
+    base.payload_inline = "dependency-base";
+    AgentStateAppendRequest base_req;
+    base_req.record = base;
+    AgentStateAppendResult base_res = svc.append(base_req);
+    REQUIRE(base_res.ok);
+
+    AgentStateRecord rec = base_session_record();
+    rec.parent_state_id = base_res.state_id;
+    rec.snapshot_base_state_id = base_res.state_id;
+    rec.payload_ref = hash_to_hex(payload_hash);
+
+    AgentStateAppendRequest req;
+    req.record = rec;
+    req.dependency_hashes = {
+        explicit_dep, payload_hash, explicit_dep, payload_hash};
+    req.sync = true;
+    AgentStateAppendResult res = svc.append(req);
+    REQUIRE(res.ok);
+
+    AgentStateDescribeResult described = svc.describe(res.state_id);
+    REQUIRE(described.ok);
+    REQUIRE(described.record.dependency_hashes.size() == 2);
+    REQUIRE(described.record.dependency_hashes[0] == explicit_dep);
+    REQUIRE(described.record.dependency_hashes[1] == payload_hash);
+
+    // Both effective dependencies were in the durable publish set. The
+    // logical-only base is the sole pending object left behind.
+    REQUIRE(store.pending_count() == 1);
+    remove_dir_recursive(root);
+}
+
+static void test_logical_append_persists_derived_payload_dependency() {
+    std::string root = make_tmp_dir();
+    ObjectStore store(root);
+    REQUIRE(store.init_layout());
+    AgentStateService svc(store);
+
+    Hash explicit_dep = store.write_blob(
+        std::vector<uint8_t>{'e','x','p'});
+    Hash payload_hash = store.write_blob(
+        std::vector<uint8_t>{'r','e','f'});
+    REQUIRE(explicit_dep != ZERO_HASH);
+    REQUIRE(payload_hash != ZERO_HASH);
+
+    AgentStateRecord rec = base_session_record();
+    rec.payload_ref = hash_to_hex(payload_hash);
+    AgentStateAppendRequest req;
+    req.record = rec;
+    req.dependency_hashes = {explicit_dep, explicit_dep};
+    req.sync = false;
+    AgentStateAppendResult res = svc.append(req);
+    REQUIRE(res.ok);
+
+    AgentStateDescribeResult described = svc.describe(res.state_id);
+    REQUIRE(described.ok);
+    REQUIRE(described.record.dependency_hashes.size() == 2);
+    REQUIRE(described.record.dependency_hashes[0] == explicit_dep);
+    REQUIRE(described.record.dependency_hashes[1] == payload_hash);
+    remove_dir_recursive(root);
+}
+
 // ── logical-only appends validate hash-shaped fields before writing ──
 static void test_sync_false_rejects_malformed_hash_fields_before_write() {
     std::string root = make_tmp_dir();
@@ -705,6 +783,8 @@ int main() {
     test_latest_returns_last_durable();
     test_large_payload_ref_round_trips();
     test_durable_append_fsyncs_payload_and_state();
+    test_append_persists_effective_dependency_set();
+    test_logical_append_persists_derived_payload_dependency();
     test_sync_false_rejects_malformed_hash_fields_before_write();
     test_path_unsafe_agent_id_rejected();
     test_missing_anchors_rejected_for_sync();

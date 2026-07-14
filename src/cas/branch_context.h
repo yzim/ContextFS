@@ -15,6 +15,10 @@ struct BranchContext {
     std::string name;
     WorkingTree wt;
     std::mutex  checkpoint_mu;
+    // Guarded by checkpoint_mu. Set before a deleted branch leaves the daemon
+    // map so operations that resolved its shared_ptr earlier fail stale rather
+    // than mutating a detached tree or creating a new live file handle.
+    bool retired = false;
 
     BranchContext(uint32_t id, std::string n)
         : branch_id(id), name(std::move(n)) {}

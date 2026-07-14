@@ -1,6 +1,7 @@
 #include "hash.h"
 #include "object_store.h"
 #include <cerrno>
+#include <ctime>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -396,6 +397,179 @@ static void test_blob_payload_size_does_not_cache_errors() {
     std::printf("  PASS test_blob_payload_size_does_not_cache_errors\n");
 }
 
+// ---------- GC primitives ----------
+
+static void test_pending_snapshot_does_not_drain() {
+    std::string root = make_tmp_dir("pending-snapshot");
+    ObjectStore store(root);
+    REQUIRE(store.init_layout());
+
+    Hash h = store.write_blob(reinterpret_cast<const uint8_t*>("gcp"), 3);
+    REQUIRE(h != ZERO_HASH);
+    auto snap = store.pending_snapshot();
+    bool found = false;
+    for (auto& x : snap) if (x == h) found = true;
+    REQUIRE(found);
+    // The snapshot is read-only: it must NOT drain the pending set.
+    auto snap2 = store.pending_snapshot();
+    REQUIRE(snap.size() == snap2.size());
+    // drain_pending() (checkpoint path) is unaffected and remains the only
+    // way to clear the set — GC marks pending objects as roots but never
+    // drains them.
+    auto drained = store.drain_pending();
+    REQUIRE(!drained.empty());
+    REQUIRE(store.pending_snapshot().empty());
+
+    remove_dir_recursive(root);
+    std::printf("  PASS test_pending_snapshot_does_not_drain\n");
+}
+
+static void test_for_each_object_enumerates() {
+    std::string root = make_tmp_dir("for-each-object");
+    ObjectStore store(root);
+    REQUIRE(store.init_layout());
+
+    Hash h1 = store.write_blob(reinterpret_cast<const uint8_t*>("one"), 3);
+    Hash h2 = store.write_blob(reinterpret_cast<const uint8_t*>("two"), 3);
+    REQUIRE(h1 != ZERO_HASH);
+    REQUIRE(h2 != ZERO_HASH);
+    size_t seen = 0;
+    bool s1 = false, s2 = false;
+    std::string err;
+    REQUIRE(store.for_each_object([&](const Hash& h, uint64_t sz, int64_t mt) {
+        seen++;
+        REQUIRE(sz > 0);
+        REQUIRE(mt > 0);
+        if (h == h1) s1 = true;
+        if (h == h2) s2 = true;
+    }, err));
+    REQUIRE(err.empty());
+    REQUIRE(seen >= 2);
+    REQUIRE(s1 && s2);
+
+    remove_dir_recursive(root);
+    std::printf("  PASS test_for_each_object_enumerates\n");
+}
+
+static void test_dedup_hit_refreshes_gc_age_fence() {
+    std::string root = make_tmp_dir("dedup-age-fence");
+    ObjectStore store(root);
+    REQUIRE(store.init_layout());
+
+    const uint8_t payload[] = {4, 3, 2, 1};
+    Hash h = store.write_blob(payload, sizeof(payload));
+    REQUIRE(h != ZERO_HASH);
+    (void)store.drain_pending();
+
+    const int64_t age_fence = static_cast<int64_t>(std::time(nullptr));
+    struct timespec old_times[2]{};
+    old_times[0].tv_sec = age_fence - 10;
+    old_times[1] = old_times[0];
+    REQUIRE(utimensat(AT_FDCWD, store.object_path(h).c_str(), old_times, 0) == 0);
+
+    // A writer adopting an existing content-addressed object must make it too
+    // new for a sweep whose age fence was established before this write.
+    REQUIRE(store.write_blob(payload, sizeof(payload)) == h);
+    struct stat st{};
+    REQUIRE(stat(store.object_path(h).c_str(), &st) == 0);
+    REQUIRE(static_cast<int64_t>(st.st_mtime) + 2 >= age_fence);
+
+    // The sweep may have enumerated the old mtime before the dedup write. Its
+    // synchronized removal primitive must re-stat and observe the adoption.
+    std::string error;
+    REQUIRE(store.remove_object_if_older_than(h, age_fence - 2, error) ==
+            ObjectStore::RemoveResult::Skipped);
+    REQUIRE(error.empty());
+    REQUIRE(store.object_exists(h));
+
+    // The existing object was already durable; adoption does not make it a
+    // newly published object that a checkpoint must fsync again.
+    REQUIRE(store.pending_count() == 0);
+
+    remove_dir_recursive(root);
+    std::printf("  PASS test_dedup_hit_refreshes_gc_age_fence\n");
+}
+
+static void test_remove_object_if_older_than_result_semantics() {
+    std::string root = make_tmp_dir("remove-age-fence");
+    ObjectStore store(root);
+    REQUIRE(store.init_layout());
+
+    const int64_t age_fence = static_cast<int64_t>(std::time(nullptr)) - 2;
+    std::string error = "stale";
+
+    Hash fresh = store.write_blob(reinterpret_cast<const uint8_t*>("fresh"), 5);
+    REQUIRE(fresh != ZERO_HASH);
+    REQUIRE(store.remove_object_if_older_than(fresh, age_fence, error) ==
+            ObjectStore::RemoveResult::Skipped);
+    REQUIRE(error.empty());
+    REQUIRE(store.object_exists(fresh));
+
+    Hash old = store.write_blob(reinterpret_cast<const uint8_t*>("old"), 3);
+    REQUIRE(old != ZERO_HASH);
+    (void)store.drain_pending();
+    struct timespec old_times[2]{};
+    old_times[0].tv_sec = age_fence;
+    old_times[1] = old_times[0];
+    REQUIRE(utimensat(AT_FDCWD, store.object_path(old).c_str(), old_times, 0) == 0);
+    REQUIRE(store.remove_object_if_older_than(old, age_fence, error) ==
+            ObjectStore::RemoveResult::Skipped);
+    REQUIRE(error.empty());
+    REQUIRE(store.object_exists(old));
+
+    old_times[0].tv_sec = age_fence - 10;
+    old_times[1] = old_times[0];
+    REQUIRE(utimensat(AT_FDCWD, store.object_path(old).c_str(), old_times, 0) == 0);
+    REQUIRE(store.remove_object_if_older_than(old, age_fence, error) ==
+            ObjectStore::RemoveResult::Removed);
+    REQUIRE(error.empty());
+    REQUIRE(!store.object_exists(old));
+
+    REQUIRE(store.remove_object_if_older_than(old, age_fence, error) ==
+            ObjectStore::RemoveResult::Skipped);
+    REQUIRE(error.empty());
+
+    // A non-empty directory at an object path gives a deterministic remove
+    // failure even when tests run as root.
+    Hash bad = tagged_hash(0xDE);
+    std::string shard = root + "/objects/" + hash_to_hex(bad).substr(0, 2);
+    REQUIRE(mkdir(shard.c_str(), 0755) == 0);
+    std::string bad_path = store.object_path(bad);
+    REQUIRE(mkdir(bad_path.c_str(), 0755) == 0);
+    int child_fd = open((bad_path + "/child").c_str(), O_WRONLY | O_CREAT, 0644);
+    REQUIRE(child_fd >= 0);
+    REQUIRE(close(child_fd) == 0);
+    REQUIRE(utimensat(AT_FDCWD, bad_path.c_str(), old_times, 0) == 0);
+    REQUIRE(store.remove_object_if_older_than(bad, age_fence, error) ==
+            ObjectStore::RemoveResult::Error);
+    REQUIRE(!error.empty());
+    REQUIRE(store.object_exists(bad));
+
+    remove_dir_recursive(root);
+    std::printf("  PASS test_remove_object_if_older_than_result_semantics\n");
+}
+
+static void test_clear_size_cache_reprobes() {
+    std::string root = make_tmp_dir("size-cache-clear");
+    ObjectStore store(root);
+    REQUIRE(store.init_layout());
+
+    Hash h = store.write_blob(reinterpret_cast<const uint8_t*>("size"), 4);
+    REQUIRE(h != ZERO_HASH);
+    uint64_t sz = 0;
+    REQUIRE(store.blob_payload_size(h, sz) == 0);
+    REQUIRE(sz == 4);
+    store.clear_size_cache();
+    // After unlinking the object, a cleared cache must re-probe and error
+    // instead of serving the stale cached size.
+    REQUIRE(std::remove(store.object_path(h).c_str()) == 0);
+    uint64_t sz2 = 0;
+    REQUIRE(store.blob_payload_size(h, sz2) != 0);
+
+    remove_dir_recursive(root);
+    std::printf("  PASS test_clear_size_cache_reprobes\n");
+}
+
 int main() {
     std::printf("test_object_store:\n");
     test_fsync_objects_reports_fdatasync_failure();
@@ -414,6 +588,11 @@ int main() {
     test_open_blob_zero_length_payload();
     test_blob_payload_size_caches_immutable_sizes();
     test_blob_payload_size_does_not_cache_errors();
+    test_pending_snapshot_does_not_drain();
+    test_for_each_object_enumerates();
+    test_dedup_hit_refreshes_gc_age_fence();
+    test_remove_object_if_older_than_result_semantics();
+    test_clear_size_cache_reprobes();
     std::printf("PASS test_object_store\n");
     return 0;
 }

@@ -174,10 +174,13 @@ for line in cpuinfo.splitlines():
     if line.startswith("model name"):
         cpu = line.split(":", 1)[1].strip()
         break
+binary_dir = pathlib.Path(sys.argv[4]).parent
 metadata = {
     "label": sys.argv[3],
     "agentvfs_binary": sys.argv[4],
-    "git_commit": subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip(),
+    "git_commit": subprocess.check_output(
+        ["git", "-C", str(binary_dir), "rev-parse", "HEAD"],
+        text=True).strip(),
     "kernel": platform.release(),
     "libfuse": subprocess.check_output(["pkg-config", "--modversion", "fuse3"], text=True).strip(),
     "cpu": cpu,

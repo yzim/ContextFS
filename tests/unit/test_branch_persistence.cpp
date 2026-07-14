@@ -15,6 +15,8 @@
 #include <algorithm>
 #include <fcntl.h>
 #include <dirent.h>
+#include <chrono>
+#include <future>
 
 using namespace cas;
 
@@ -235,6 +237,27 @@ static void test_list_refs_regular_files_only() {
     std::printf("  PASS test_list_refs_regular_files_only\n");
 }
 
+static void test_read_ref_rejects_noncanonical_contents() {
+    std::string root = make_tmp_dir("strict-ref");
+    REQUIRE(mkdir((root + "/refs").c_str(), 0755) == 0);
+    Refs refs(root);
+    Hash value = tagged_hash(0x42);
+    Hash parsed = ZERO_HASH;
+    const std::string hex = hash_to_hex(value);
+
+    write_file(root + "/refs/main", hex + "\n");
+    REQUIRE(refs.read_ref("main", parsed));
+    REQUIRE(parsed == value);
+
+    write_file(root + "/refs/main", hex);
+    REQUIRE(!refs.read_ref("main", parsed));
+    write_file(root + "/refs/main", hex + "\ntrailing");
+    REQUIRE(!refs.read_ref("main", parsed));
+
+    remove_dir_recursive(root);
+    std::printf("  PASS test_read_ref_rejects_noncanonical_contents\n");
+}
+
 static void test_branch_name_validation() {
     assert(!is_valid_branch_name(""));
     assert(!is_valid_branch_name(std::string(65, 'a')));
@@ -266,14 +289,92 @@ static void test_branch_name_validation() {
     std::printf("  PASS test_branch_name_validation\n");
 }
 
+static void test_gc_and_failed_branch_create_do_not_deadlock() {
+    std::string root = make_tmp_dir("gc-create-lock-order");
+    std::string source = root + "/src";
+    std::string mount = root + "/mnt";
+    std::string store_root = root + "/store";
+    REQUIRE(mkdir(source.c_str(), 0755) == 0);
+    REQUIRE(mkdir(mount.c_str(), 0755) == 0);
+
+    Daemon daemon(source, mount, store_root);
+    REQUIRE(daemon.initialize());
+
+    // Force create_branch's source-ref read to fail, but hold checkpoint_mu so
+    // the create thread first reaches the lock acquisition point. The old
+    // failure path then reacquired branches_mu_ while still holding
+    // checkpoint_mu, exactly opposite GC's branches_mu_ -> checkpoint_mu order.
+    std::unique_lock<std::mutex> checkpoint_hold(
+        daemon.main_branch()->checkpoint_mu);
+    REQUIRE(std::remove((store_root + "/refs/main").c_str()) == 0);
+
+    auto create = std::async(std::launch::async, [&] {
+        return daemon.create_branch("will-fail", "main");
+    });
+    REQUIRE(create.wait_for(std::chrono::milliseconds(50)) ==
+            std::future_status::timeout);
+
+    auto gc = std::async(std::launch::async, [&] {
+        return daemon.run_gc(GcPolicy{});
+    });
+    checkpoint_hold.unlock();
+
+    REQUIRE(create.wait_for(std::chrono::seconds(2)) ==
+            std::future_status::ready);
+    REQUIRE(create.get() == UINT32_MAX);
+    REQUIRE(gc.wait_for(std::chrono::seconds(2)) == std::future_status::ready);
+    GcResult gc_result = gc.get();
+    REQUIRE(!gc_result.ok);
+    REQUIRE(gc_result.error.find("expected branch ref missing: main") !=
+            std::string::npos);
+
+    remove_dir_recursive(root);
+    std::printf("  PASS test_gc_and_failed_branch_create_do_not_deadlock\n");
+}
+
+static void test_deleted_branch_is_retired_and_handles_are_stale() {
+    std::string root = make_tmp_dir("branch-retired");
+    std::string source = root + "/src";
+    std::string mount = root + "/mnt";
+    std::string store_root = root + "/store";
+    REQUIRE(mkdir(source.c_str(), 0755) == 0);
+    REQUIRE(mkdir(mount.c_str(), 0755) == 0);
+
+    Daemon daemon(source, mount, store_root);
+    REQUIRE(daemon.initialize());
+    uint32_t id = daemon.create_branch("retire-me", "main");
+    REQUIRE(id != UINT32_MAX);
+    auto branch = daemon.branch(id);
+    REQUIRE(branch != nullptr);
+
+    auto state = std::make_unique<FhState>();
+    state->branch_id = id;
+    uint64_t fh = daemon.allocate_fh(std::move(state));
+    REQUIRE(daemon.delete_branch("retire-me"));
+    {
+        std::lock_guard<std::mutex> lk(branch->checkpoint_mu);
+        REQUIRE(branch->retired);
+    }
+    auto stale = daemon.get_fh(fh);
+    REQUIRE(stale != nullptr && stale->stale);
+    REQUIRE(daemon.branch(id) == nullptr);
+    daemon.release_fh(fh);
+
+    remove_dir_recursive(root);
+    std::printf("  PASS test_deleted_branch_is_retired_and_handles_are_stale\n");
+}
+
 int main() {
     std::printf("test_branch_persistence:\n");
     test_branch_name_validation();
     test_list_refs_regular_files_only();
+    test_read_ref_rejects_noncanonical_contents();
     test_daemon_restores_checkpointed_branch();
     test_daemon_skips_corrupt_non_main_ref();
     test_daemon_init_does_not_write_main_ref_when_empty_tree_write_fails();
     test_write_ref_reports_refs_dir_fsync_failure();
+    test_gc_and_failed_branch_create_do_not_deadlock();
+    test_deleted_branch_is_retired_and_handles_are_stale();
     std::printf("All branch persistence tests passed.\n");
     return 0;
 }

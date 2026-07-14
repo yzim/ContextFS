@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cstdio>
+#include <fstream>
 #include <memory>
 #include <utility>
 
@@ -24,6 +25,22 @@ static std::string default_merge_label(
     return "merge " + source_name + " into " + target_name;
 }
 
+// VmRSS (kB) from /proc/self/status; 0 when unavailable (non-Linux or the
+// field/file absent). Powers MemoryStats.rss_kb for stats.memory.
+static uint64_t read_rss_kb() {
+    std::ifstream in("/proc/self/status");
+    std::string line;
+    while (std::getline(in, line)) {
+        if (line.rfind("VmRSS:", 0) == 0) {
+            unsigned long long kb = 0;
+            if (std::sscanf(line.c_str(), "VmRSS: %llu", &kb) == 1)
+                return static_cast<uint64_t>(kb);
+            return 0;
+        }
+    }
+    return 0;
+}
+
 Daemon::Daemon(std::string source_root, std::string mount_point, std::string store_root)
     : source_root_(std::move(source_root))
     , mount_point_(std::move(mount_point))
@@ -40,6 +57,13 @@ Daemon::Daemon(std::string source_root, std::string mount_point, std::string sto
 }
 
 Daemon::~Daemon() {
+    // Bootstrap owns a background thread that references main_branch_->wt.
+    // Join it explicitly while every BranchContext is still alive; member
+    // destruction order alone would destroy branches before bootstrap_.
+    if (bootstrap_) {
+        bootstrap_->stop_background();
+        bootstrap_.reset();
+    }
     // Defensive: even if main.cpp forgot to call shutdown_telemetry(), this
     // ensures the registry is stopped before its destructor runs (so any
     // FUSE/probe threads have quiesced) and before the rest of Daemon is
@@ -73,7 +97,8 @@ bool Daemon::initialize() {
     store_.cleanup_tmp();
 
     Hash current;
-    if (!refs_.read_main(current)) {
+    bool fresh_mount = !refs_.read_main(current);
+    if (fresh_mount) {
         std::vector<Hash> written;
         Hash empty_tree = serialize_working_tree(main_branch_->wt, store_, written);
         if (empty_tree == ZERO_HASH) return false;
@@ -98,9 +123,18 @@ bool Daemon::initialize() {
     }
 
     std::string error;
-    if (!rebuild_main_from_ref(error)) {
-        std::fprintf(stderr, "agentvfs: failed to restore main branch: %s\n", error.c_str());
-        return false;
+    if (!fresh_mount) {
+        // Restart: restore main from its ref as an authoritative base. On a fresh
+        // mount, main_branch_->wt is already the empty non-authoritative tree that
+        // lazy bootstrap fills and the background walk later folds authoritative
+        // (mem-and-gc design). Rebuilding from the placeholder "initial" empty
+        // commit would wrongly mark main authoritative with an empty base, which
+        // activates tombstone hygiene before any real snapshot exists — erasing
+        // real deletions of lazy-ingested content (broke branch merge reingest).
+        if (!rebuild_main_from_ref(error)) {
+            std::fprintf(stderr, "agentvfs: failed to restore main branch: %s\n", error.c_str());
+            return false;
+        }
     }
 
     load_persisted_branches();
@@ -300,8 +334,15 @@ std::shared_ptr<BranchContext> Daemon::branch_by_name_locked(
     return br;
 }
 
+AgentStateAppendResult Daemon::append_agent_state(
+    const AgentStateAppendRequest& request) {
+    std::lock_guard<std::recursive_mutex> publish_lk(gc_publish_mu_);
+    return agent_state_.append(request);
+}
+
 RollbackResult Daemon::rollback_branch_to_commit(const std::string& branch_name,
                                                  const Hash& target) {
+    std::lock_guard<std::recursive_mutex> publish_lk(gc_publish_mu_);
     // Same lock acquisition as the former inline `rollback` command body:
     // branch_by_name_locked takes branches_mu_ -> checkpoint_mu in the
     // documented order and hands back the held lock via checkpoint_lk.
@@ -329,6 +370,8 @@ std::shared_ptr<BranchContext> Daemon::branch_for_pid(Pid pid) {
 CheckpointResult Daemon::checkpoint_branch(
     const std::shared_ptr<BranchContext>& br,
     const std::string& label) {
+
+    std::lock_guard<std::recursive_mutex> publish_lk(gc_publish_mu_);
 
     if (!br) return {false, ZERO_HASH, "unknown branch"};
 
@@ -359,6 +402,8 @@ CheckpointResult Daemon::checkpoint_branch_by_name(
     const std::string& branch_name,
     const std::string& label) {
 
+    std::lock_guard<std::recursive_mutex> publish_lk(gc_publish_mu_);
+
     std::unique_lock<std::mutex> checkpoint_lk;
     auto br = branch_by_name_locked(branch_name, checkpoint_lk);
     if (!br) return {false, ZERO_HASH, "unknown branch"};
@@ -374,6 +419,7 @@ CheckpointResult Daemon::checkpoint_branch_by_name(
 }
 
 uint32_t Daemon::create_branch(const std::string& name, const std::string& from) {
+    std::lock_guard<std::recursive_mutex> publish_lk(gc_publish_mu_);
     std::shared_ptr<BranchContext> src_snap;
     {
         std::unique_lock<std::shared_mutex> lk(branches_mu_);
@@ -391,32 +437,31 @@ uint32_t Daemon::create_branch(const std::string& name, const std::string& from)
         branch_source_reservations_[from]++;
     }
 
-    auto clear_reservation = [this, &name] {
+    auto clear_reservations = [this, &name, &from] {
         std::unique_lock<std::shared_mutex> lk(branches_mu_);
         branch_create_reservations_.erase(name);
-    };
-    auto clear_source_reservation = [this, &from] {
-        std::unique_lock<std::shared_mutex> lk(branches_mu_);
         auto it = branch_source_reservations_.find(from);
         if (it == branch_source_reservations_.end()) return;
         if (it->second <= 1) branch_source_reservations_.erase(it);
         else it->second--;
     };
-    auto clear_reservations = [&] {
-        clear_reservation();
-        clear_source_reservation();
-    };
 
     uint32_t id = next_branch_id_.fetch_add(1);
     Hash src_commit = ZERO_HASH;
     std::shared_ptr<BranchContext> br;
+    bool source_ref_ok = false;
     {
         std::lock_guard<std::mutex> src_lk(src_snap->checkpoint_mu);
-        if (!refs_.read_ref(from, src_commit)) {
-            clear_reservations();
-            return UINT32_MAX;
+        source_ref_ok = refs_.read_ref(from, src_commit);
+        if (source_ref_ok) {
+            br = std::make_shared<BranchContext>(id, name, src_snap->wt.clone());
         }
-        br = std::make_shared<BranchContext>(id, name, src_snap->wt.clone());
+    }
+    // Never acquire branches_mu_ while holding checkpoint_mu. GC and branch
+    // deletion use the documented branches_mu_ -> checkpoint_mu order.
+    if (!source_ref_ok) {
+        clear_reservations();
+        return UINT32_MAX;
     }
 
     if (!refs_.write_ref(name, src_commit, store_.tmp_dir())) {
@@ -449,6 +494,8 @@ BranchMergeResult Daemon::merge_branch(
     const std::string& source_name,
     const std::string& target_name,
     const std::string& label) {
+
+    std::lock_guard<std::recursive_mutex> publish_lk(gc_publish_mu_);
 
     BranchMergeResult result;
     std::shared_ptr<BranchContext> source;
@@ -568,6 +615,7 @@ BranchMergeResult Daemon::merge_branch(
 }
 
 bool Daemon::delete_branch(const std::string& name) {
+    std::lock_guard<std::recursive_mutex> publish_lk(gc_publish_mu_);
     if (name == "main") return false;
 
     // Extract the branch from the map under branches_mu_. After erase, any
@@ -591,6 +639,7 @@ bool Daemon::delete_branch(const std::string& name) {
         // branches_mu_) so there is no inversion risk.
         std::lock_guard<std::mutex> br_lk(br->checkpoint_mu);
         if (!refs_.remove_ref(name)) return false;
+        br->retired = true;
         invalidate_fhs_for_branch(br->branch_id);
         branch_name_ids_.erase(name);
         branches_.erase(br->branch_id);
@@ -604,6 +653,131 @@ std::vector<std::shared_ptr<BranchContext>> Daemon::list_branches() {
     std::vector<std::shared_ptr<BranchContext>> result;
     for (auto& [_, br] : branches_) result.push_back(br);
     return result;
+}
+
+MemoryStats Daemon::collect_memory_stats() {
+    std::lock_guard<std::recursive_mutex> publish_lk(gc_publish_mu_);
+    MemoryStats out;
+
+    // Match the mutation/checkpoint lock order used throughout the daemon.
+    // Holding every branch checkpoint lock also makes the WriteBuffer sample
+    // below race-free: all platform adapters mutate their buffers under the
+    // owning branch's checkpoint_mu.
+    std::shared_lock<std::shared_mutex> branches_lk(branches_mu_);
+    std::vector<std::unique_lock<std::mutex>> checkpoint_locks;
+    checkpoint_locks.reserve(branches_.size());
+    for (auto& [_, br] : branches_)
+        checkpoint_locks.emplace_back(br->checkpoint_mu);
+
+    for (auto& [_, br] : branches_) {
+        WorkingTreeMemoryStats wt = br->wt.memory_stats();
+        BranchMemoryStats bs;
+        bs.name = br->name;
+        bs.base_entries = wt.base_entries;
+        bs.base_shared_by = wt.base_shared_by;
+        bs.delta_entries = wt.delta_entries;
+        bs.delta_tombstones = wt.delta_tombstones;
+        out.branches.push_back(std::move(bs));
+    }
+    {
+        std::lock_guard<std::mutex> lk(fh_table_mu_);
+        for (auto& [fh, st] : fh_table_) {
+            (void)fh;
+            if (st && st->write_buf) {
+                out.write_buffer_count++;
+                out.write_buffer_dirty_bytes += st->write_buf->dirty_bytes();
+            }
+        }
+    }
+    out.rss_kb = read_rss_kb();
+    return out;
+}
+
+// Collects every live GC root reachable from in-memory daemon state. Called
+// by run_gc/verify_gc UNDER branches_mu_ (unique) + every branch
+// checkpoint_mu, so the WorkingTree snapshots, fh table, pending set and
+// supervisor list it reads are mutually consistent with publishing. Locks
+// are taken by the caller; this function only reads.
+static GcLiveRoots collect_live_roots_locked(
+    const std::map<uint32_t, std::shared_ptr<BranchContext>>& branches,
+    std::unordered_map<uint64_t, std::shared_ptr<FhState>>& fh_table,
+    std::mutex& fh_mu, ObjectStore& store, RuntimeSupervisor& sup) {
+    GcLiveRoots live;
+    // Every WT entry across every branch (both base and delta layers,
+    // including Deleted whiteouts — a Deleted entry's hash is ZERO_HASH and
+    // is filtered below). branches is a std::map keyed by branch_id, so this
+    // iteration is in ascending id order, matching the lock order.
+    for (auto& [id, br] : branches) {
+        (void)id;
+        live.expected_branch_refs.push_back(br->name);
+        br->wt.for_each_including_deleted(
+            [&](const std::string&, const WorkingTreeEntry& e) {
+                if ((e.kind == EntryKind::Blob || e.kind == EntryKind::Symlink) &&
+                    !(e.hash == ZERO_HASH))
+                    live.wt_hashes.push_back(e.hash);
+            });
+    }
+    {
+        std::lock_guard<std::mutex> lk(fh_mu);
+        for (auto& [fh, st] : fh_table) {
+            (void)fh;
+            if (!st) continue;
+            if (!(st->base_blob == ZERO_HASH))
+                live.fh_blob_hashes.push_back(st->base_blob);
+            if (!(st->pinned_commit == ZERO_HASH))
+                live.fh_pinned_commits.push_back(st->pinned_commit);
+        }
+    }
+    live.pending = store.pending_snapshot();
+    // Live cooperative-runtime union states: RuntimeSupervisor::list() returns
+    // one RuntimeStatus per runtime; each carries its templates, and the live
+    // union_state_id lives on the TemplateStatus (not the RuntimeStatus).
+    for (auto& rt : sup.list()) {
+        for (auto& tpl : rt.templates) {
+            Hash h;
+            if (tpl.union_state_id.size() == 64 &&
+                hex_to_hash(tpl.union_state_id.c_str(), h))
+                live.runtime_union_states.push_back(h);
+        }
+    }
+    return live;
+}
+
+GcResult Daemon::run_gc(const GcPolicy& policy) {
+    std::lock_guard<std::recursive_mutex> publish_lk(gc_publish_mu_);
+    GcLiveRoots live;
+    {
+        // Existing lock order: branches_mu_ -> checkpoint_mu. These locks make
+        // the live WT/FH snapshot coherent, but are deliberately released
+        // before mark+sweep so FUSE mutations can continue behind the age fence.
+        std::unique_lock<std::shared_mutex> blk(branches_mu_);
+        std::vector<std::unique_lock<std::mutex>> checkpoint_locks;
+        for (auto& [id, br] : branches_) {
+            (void)id;
+            checkpoint_locks.emplace_back(br->checkpoint_mu);
+        }
+        live = collect_live_roots_locked(
+            branches_, fh_table_, fh_table_mu_, store_, runtime_supervisor_);
+    }
+    GcRunner gc(store_, refs_);
+    return gc.run(live, policy);
+}
+
+GcResult Daemon::verify_gc(const GcPolicy& policy) {
+    std::lock_guard<std::recursive_mutex> publish_lk(gc_publish_mu_);
+    GcLiveRoots live;
+    {
+        std::unique_lock<std::shared_mutex> blk(branches_mu_);
+        std::vector<std::unique_lock<std::mutex>> checkpoint_locks;
+        for (auto& [id, br] : branches_) {
+            (void)id;
+            checkpoint_locks.emplace_back(br->checkpoint_mu);
+        }
+        live = collect_live_roots_locked(
+            branches_, fh_table_, fh_table_mu_, store_, runtime_supervisor_);
+    }
+    GcRunner gc(store_, refs_);
+    return gc.verify(live, policy);
 }
 
 bool Daemon::is_hidden(const std::string& path) {
@@ -622,6 +796,7 @@ bool Daemon::is_hidden(const std::string& path) {
 // ---------------------------------------------------------------------------
 
 RuntimeSnapshotResult Daemon::snapshot_runtime(const RuntimeSnapshotRequest& request) {
+    std::lock_guard<std::recursive_mutex> publish_lk(gc_publish_mu_);
     RuntimeSnapshotResult result;
     result.runtime_id = request.runtime_id;
     std::string error;
@@ -819,6 +994,7 @@ RuntimeSnapshotResult Daemon::snapshot_runtime(const RuntimeSnapshotRequest& req
 
 RuntimeRestoreResult Daemon::restore_runtime(const std::string& union_state_id_hex,
                                              uint64_t timeout_ms) {
+    std::lock_guard<std::recursive_mutex> publish_lk(gc_publish_mu_);
     RuntimeRestoreResult result;
     std::string error;
 

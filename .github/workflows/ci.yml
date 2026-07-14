@@ -20,34 +20,7 @@ jobs:
       - name: Build
         run: cmake --build build -j
       - name: Unit tests
-        run: |
-          run_test() {
-            echo "==> $1"
-            "$1"
-          }
-
-          run_test ./build/tests/cas_test_working_tree
-          run_test ./build/tests/cas_test_write_buffer
-          run_test ./build/tests/cas_test_object_store
-          run_test ./build/tests/cas_test_branch_context
-          run_test ./build/tests/cas_test_branch_merge
-          run_test ./build/tests/cas_test_branch_merge_commit
-          run_test ./build/tests/cas_test_branch_merge_daemon
-          run_test ./build/tests/cas_test_branch_persistence
-          run_test ./build/tests/cas_test_branch_router
-          run_test ./build/tests/cas_test_cgroup_watch
-          run_test ./build/tests/cas_test_blake3_simd
-          run_test ./build/tests/cas_test_telemetry_event
-          run_test ./build/tests/cas_test_telemetry_registry
-          run_test ./build/tests/cas_test_workspace_cli
-          run_test ./build/tests/cas_test_ebpf_backend
-          run_test ./build/tests/cas_test_fanotify_backend
-          run_test ./build/tests/cas_test_ptrace_backend
-          run_test ./build/tests/cas_test_ldpreload_backend
-          run_test ./build/tests/cas_test_bpftime_backend
-          run_test ./build/tests/cas_test_wasm_backend
-          run_test ./build/tests/cas_test_lua_backend
-          run_test ./build/tests/cas_test_ldpreload_preload
+        run: ctest --test-dir build --output-on-failure
 
   macos-unit-tests:
     runs-on: macos-latest
@@ -62,20 +35,7 @@ jobs:
       - name: Build
         run: cmake --build build -j
       - name: Unit tests
-        run: |
-          ./build/tests/cas_test_working_tree
-          ./build/tests/cas_test_write_buffer
-          ./build/tests/cas_test_object_store
-          ./build/tests/cas_test_branch_context
-          ./build/tests/cas_test_branch_merge
-          ./build/tests/cas_test_branch_merge_commit
-          ./build/tests/cas_test_branch_router
-          ./build/tests/cas_test_cgroup_watch
-          ./build/tests/cas_test_blake3_simd
-          ./build/tests/cas_test_telemetry_event
-          ./build/tests/cas_test_telemetry_registry
-          ./build/tests/cas_test_workspace_cli
-          ./build/tests/cas_test_fuse_t_preflight
+        run: ctest --test-dir build --output-on-failure
 
   windows-unit-tests:
     runs-on: windows-latest
@@ -89,17 +49,7 @@ jobs:
       - name: Build
         run: cmake --build build --config Release -j
       - name: Unit tests
-        run: |
-          .\build\tests\Release\cas_test_working_tree.exe
-          .\build\tests\Release\cas_test_write_buffer.exe
-          .\build\tests\Release\cas_test_branch_context.exe
-          .\build\tests\Release\cas_test_branch_merge.exe
-          .\build\tests\Release\cas_test_branch_router.exe
-          .\build\tests\Release\cas_test_cgroup_watch.exe
-          .\build\tests\Release\cas_test_blake3_simd.exe
-          .\build\tests\Release\cas_test_telemetry_event.exe
-          .\build\tests\Release\cas_test_win_helpers.exe
-          .\build\tests\Release\cas_test_named_pipe_channel.exe
+        run: ctest --test-dir build -C Release --output-on-failure
 
   linux-system-tests:
     runs-on: ubuntu-latest
@@ -144,6 +94,7 @@ jobs:
           run_system_test tests/system/test_cas_smoke.sh
           run_system_test tests/system/test_cas_bootstrap.sh
           run_system_test tests/system/test_cas_fh_lifecycle.sh
+          run_system_test tests/system/test_cas_gc_live.sh
           run_root_system_test tests/system/test_cas_branching.sh
           run_root_system_test tests/system/test_cas_branch_merge.sh
           run_root_system_test tests/system/test_cas_multi_branch.sh

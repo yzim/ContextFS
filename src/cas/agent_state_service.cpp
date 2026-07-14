@@ -296,8 +296,18 @@ AgentStateService::append(const AgentStateAppendRequest& req) {
         }
     }
 
-    std::vector<Hash> dependency_hashes = req.dependency_hashes;
-    if (req.sync && !req.record.payload_ref.empty() &&
+    // Compute the dependency set once and use it for both serialized state and
+    // durable publication. Preserve first-seen request order while removing
+    // duplicates, then append the derived payload dependency if necessary.
+    std::vector<Hash> dependency_hashes;
+    dependency_hashes.reserve(req.dependency_hashes.size() + 1);
+    for (const Hash& dependency : req.dependency_hashes) {
+        if (std::find(dependency_hashes.begin(), dependency_hashes.end(),
+                      dependency) == dependency_hashes.end()) {
+            dependency_hashes.push_back(dependency);
+        }
+    }
+    if (!req.record.payload_ref.empty() &&
         std::find(dependency_hashes.begin(), dependency_hashes.end(),
                   payload_hash) == dependency_hashes.end()) {
         dependency_hashes.push_back(payload_hash);

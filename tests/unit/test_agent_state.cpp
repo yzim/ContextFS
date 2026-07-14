@@ -135,6 +135,47 @@ static void test_roundtrip_preserves_fields() {
     REQUIRE(out.boundary == true);
 }
 
+static void test_dependency_hashes_round_trip_and_old_records_default_empty() {
+    AgentStateRecord dependency_free = sample_state();
+    std::vector<uint8_t> dependency_free_body =
+        serialize_agent_state_record(dependency_free);
+    std::string dependency_free_text(dependency_free_body.begin(),
+                                     dependency_free_body.end());
+    REQUIRE(dependency_free_text.find("\ndependency_hash=") ==
+            std::string::npos);
+
+    AgentStateRecord in = sample_state();
+    in.dependency_hashes = {tagged_hash(0x11), tagged_hash(0x22)};
+
+    std::vector<uint8_t> body = serialize_agent_state_record(in);
+    std::string text(body.begin(), body.end());
+    REQUIRE(text.find("\ndependency_hash=" +
+                      hash_to_hex(in.dependency_hashes[0]) + "\n") !=
+            std::string::npos);
+    REQUIRE(text.find("\ndependency_hash=" +
+                      hash_to_hex(in.dependency_hashes[1]) + "\n") !=
+            std::string::npos);
+
+    AgentStateRecord out;
+    std::string error;
+    REQUIRE(deserialize_agent_state_record(body, out, error));
+    REQUIRE(error.empty());
+    REQUIRE(out.dependency_hashes == in.dependency_hashes);
+
+    // Records written before dependency persistence have no dependency_hash
+    // lines. They remain valid v1 records and default to an empty set.
+    const std::string old_body =
+        "agentvfs.agent_state.v1\n"
+        "record_version=1\n"
+        "agent_id=legacy-agent\n"
+        "payload_ref=\n";
+    REQUIRE(deserialize_agent_state_record(
+        std::vector<uint8_t>(old_body.begin(), old_body.end()), out, error));
+    REQUIRE(error.empty());
+    REQUIRE(out.agent_id == "legacy-agent");
+    REQUIRE(out.dependency_hashes.empty());
+}
+
 static void test_kind_enum_roundtrip() {
     const AgentStateKind kinds[] = {
         AgentStateKind::Session,
@@ -256,6 +297,21 @@ static void test_invalid_hash_fields_rejected() {
     // Invalid snapshot_base_state_id.
     {
         std::string body = header + "snapshot_base_state_id=bad\n";
+        auto r = try_parse(body);
+        REQUIRE(!r.first);
+        REQUIRE(!r.second.empty());
+    }
+    // Invalid persisted dependency hash.
+    {
+        std::string body = header + "dependency_hash=not-a-hash\n";
+        auto r = try_parse(body);
+        REQUIRE(!r.first);
+        REQUIRE(!r.second.empty());
+    }
+    // ZERO_HASH cannot name a dependency object.
+    {
+        std::string body =
+            header + "dependency_hash=" + hash_to_hex(ZERO_HASH) + "\n";
         auto r = try_parse(body);
         REQUIRE(!r.first);
         REQUIRE(!r.second.empty());
@@ -391,9 +447,30 @@ static void test_sync_write_publishes_without_error() {
     remove_dir_recursive(root);
 }
 
+static void test_write_persists_publication_dependencies() {
+    std::string root = make_tmp_dir();
+    ObjectStore store(root);
+    REQUIRE(store.init_layout());
+
+    AgentStateRecord s = sample_state();
+    std::vector<Hash> deps{tagged_hash(0x31), tagged_hash(0x32)};
+    std::string error;
+    Hash id = write_agent_state_record(store, s, deps, /*sync=*/false, error);
+    REQUIRE(id != ZERO_HASH);
+    REQUIRE(error.empty());
+    REQUIRE(s.dependency_hashes == deps);
+
+    AgentStateRecord out;
+    REQUIRE(read_agent_state_record(store, id, out, error));
+    REQUIRE(error.empty());
+    REQUIRE(out.dependency_hashes == deps);
+    remove_dir_recursive(root);
+}
+
 int main() {
     std::printf("test_agent_state:\n");
     test_roundtrip_preserves_fields();
+    test_dependency_hashes_round_trip_and_old_records_default_empty();
     test_kind_enum_roundtrip();
     test_serialization_omits_state_id();
     test_cas_write_assigns_state_id_from_blob_hash();
@@ -404,6 +481,7 @@ int main() {
     test_write_fails_when_dependency_is_zero_hash();
     test_write_rejects_record_with_malformed_hash_field();
     test_sync_write_publishes_without_error();
+    test_write_persists_publication_dependencies();
     std::printf("PASS cas_test_agent_state\n");
     return 0;
 }

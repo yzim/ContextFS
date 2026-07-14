@@ -21,9 +21,16 @@ Hash serialize_working_tree(
     std::vector<Hash>* referenced_leaf_hashes = nullptr,
     std::string* error = nullptr);
 
+// Rebuilds a WorkingTree from a serialized root tree. On success the
+// rebuilt map is published via WorkingTree::set_base (authoritative base,
+// empty delta). On ANY failure returns false with `wt` untouched; when a
+// a tree object is genuinely absent, *error starts with "tree object missing"
+// (rollback maps only that case to the retention-compaction error). Existing
+// but unreadable or corrupt objects use a distinct error.
 bool rebuild_working_tree(
     const Hash& root_tree,
     ObjectStore& store,
-    WorkingTree& wt);
+    WorkingTree& wt,
+    std::string* error = nullptr);
 
 } // namespace cas

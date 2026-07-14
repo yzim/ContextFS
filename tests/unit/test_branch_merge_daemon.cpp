@@ -254,7 +254,8 @@ static void test_merge_deleted_source_root_file_is_not_reingested_by_lazy_bootst
 
     Daemon& d = env.daemon;
     auto main = d.main_branch();
-    Bootstrap bs(env.source, d.store(), main->wt, d.inode_map());
+    Bootstrap bs(env.source, d.store(), main->wt, d.inode_map(),
+                 main->checkpoint_mu);
     REQUIRE(bs.ensure_path("/victim.txt"));
 
     auto base_cp = checkpoint_branch(d, main, "base");
@@ -285,7 +286,8 @@ static void test_merge_deleted_source_root_file_survives_restart_and_background_
         Daemon d(source, mount, store_root);
         REQUIRE(d.initialize());
         auto main = d.main_branch();
-        Bootstrap bs(source, d.store(), main->wt, d.inode_map());
+        Bootstrap bs(source, d.store(), main->wt, d.inode_map(),
+                     main->checkpoint_mu);
         REQUIRE(bs.ensure_path("/victim.txt"));
 
         auto base_cp = checkpoint_branch(d, main, "base");
@@ -304,7 +306,8 @@ static void test_merge_deleted_source_root_file_survives_restart_and_background_
         auto main = reloaded.main_branch();
         REQUIRE(!main->wt.lookup("/victim.txt").has_value());
 
-        Bootstrap bs(source, reloaded.store(), main->wt, reloaded.inode_map());
+        Bootstrap bs(source, reloaded.store(), main->wt, reloaded.inode_map(),
+                     main->checkpoint_mu);
         bs.start_background();
         wait_for_bootstrap(bs);
         bs.stop_background();

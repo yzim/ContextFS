@@ -22,6 +22,9 @@ public:
 
     bool over_cap() const { return dirty_bytes_ >= WRITE_BUFFER_MAX_BYTES; }
     bool is_dirty() const { return dirty_bytes_ > 0 || size_override_.has_value(); }
+    // Bytes of dirty overlay data outstanding (the mem-and-gc stats.memory
+    // command sums this across open file handles).
+    uint64_t dirty_bytes() const { return dirty_bytes_; }
 
     std::vector<uint8_t> materialize(const std::vector<uint8_t>& base_data) const;
 

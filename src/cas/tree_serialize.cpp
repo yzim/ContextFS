@@ -1,10 +1,12 @@
 #include "tree_serialize.h"
 #include <algorithm>
 #include <cstring>
+#include <filesystem>
 #include <map>
 #include <sstream>
 
 namespace cas {
+namespace fs = std::filesystem;
 
 std::vector<uint8_t> serialize_tree_entries(
     const std::vector<std::pair<std::string, WorkingTreeEntry>>& children) {
@@ -158,8 +160,10 @@ Hash serialize_working_tree(
 bool rebuild_working_tree(
     const Hash& root_tree,
     ObjectStore& store,
-    WorkingTree& wt) {
-    wt.clear();
+    WorkingTree& wt,
+    std::string* error) {
+
+    WorkingTree::EntryMap scratch;
 
     struct DirWork {
         Hash hash;
@@ -173,19 +177,43 @@ bool rebuild_working_tree(
         stack.pop_back();
 
         std::vector<uint8_t> body;
-        if (!store.read_tree(hash, body)) return false;
+        if (!store.read_tree(hash, body)) {
+            if (error) {
+                const std::string hex = hash_to_hex(hash);
+                std::error_code status_error;
+                fs::file_status status = fs::symlink_status(
+                    store.object_path(hash), status_error);
+                if ((!status_error && status.type() == fs::file_type::not_found) ||
+                    status_error == std::errc::no_such_file_or_directory) {
+                    *error = "tree object missing: " + hex;
+                } else if (status_error) {
+                    *error = "failed to inspect tree object: " + hex + ": " +
+                             status_error.message();
+                } else {
+                    // The path still exists, so a wrong tag, short read, or
+                    // other read failure is not evidence of GC compaction.
+                    *error = "tree object unreadable: " + hex;
+                }
+            }
+            return false;
+        }
 
         std::vector<std::tuple<std::string, uint32_t, EntryKind, Hash>> entries;
-        if (!deserialize_tree_entries(body, entries)) return false;
+        if (!deserialize_tree_entries(body, entries)) {
+            if (error) *error = "corrupt tree object: " + hash_to_hex(hash);
+            return false;
+        }
 
         for (auto& [name, mode, kind, h] : entries) {
             std::string path = (prefix == "/") ? ("/" + name) : (prefix + "/" + name);
-            wt.insert(path, {kind, h, mode});
+            scratch[path] = {kind, h, mode};
             if (kind == EntryKind::Tree) {
                 stack.push_back({h, path});
             }
         }
     }
+
+    wt.set_base(std::move(scratch));
     return true;
 }
 

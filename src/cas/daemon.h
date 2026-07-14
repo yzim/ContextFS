@@ -5,6 +5,7 @@
 #include "branch_merge.h"
 #include "branch_router.h"
 #include "checkpoint.h"
+#include "gc.h"
 #include "inode_map.h"
 #include "object_store.h"
 #include "policy_installer.h"
@@ -55,6 +56,26 @@ struct BranchMergeResult {
     Hash commit_hash = ZERO_HASH;
     std::vector<std::string> conflicts;
     std::string error;
+};
+
+// Per-branch WorkingTree snapshot for the stats.memory control command
+// (2026-07-13 mem-and-gc design, Task 3). base_shared_by is the base_'
+// shared_ptr use_count (0 = no base), exposing how many branches share the
+// COW base EntryMap.
+struct BranchMemoryStats {
+    std::string name;
+    uint64_t base_entries, delta_entries, delta_tombstones;
+    int64_t base_shared_by;
+};
+
+// Aggregated memory snapshot: per-branch tree stats, outstanding write-buffer
+// dirty bytes summed across open file handles, and the process VmRSS. The
+// stats.memory command serializes this verbatim (the JSON shape is a contract
+// for the mem-and-gc benchmark harness).
+struct MemoryStats {
+    std::vector<BranchMemoryStats> branches;
+    uint64_t write_buffer_count = 0, write_buffer_dirty_bytes = 0;
+    uint64_t rss_kb = 0;
 };
 
 class Daemon {
@@ -121,6 +142,11 @@ public:
     // are never dispatched before initialize() completes.
     AgentStateService& agent_state() { return agent_state_; }
     const AgentStateService& agent_state() const { return agent_state_; }
+    // Durable state publication participates in the same publication gate as
+    // checkpoints, branch refs, runtime snapshots, and GC.  Control handlers
+    // must use this wrapper instead of calling AgentStateService::append
+    // directly.
+    AgentStateAppendResult append_agent_state(const AgentStateAppendRequest& req);
 
     // Reusable branch-rollback orchestration: resolves the branch under the
     // branch checkpoint lock, calls CheckpointManager::rollback_locked against
@@ -160,6 +186,20 @@ public:
                                    const std::string& label);
     bool delete_branch(const std::string& name);
     std::vector<std::shared_ptr<BranchContext>> list_branches();
+    // Snapshot of per-branch WorkingTree + write-buffer + RSS state for the
+    // stats.memory control command.
+    MemoryStats collect_memory_stats();
+
+    // Offline GC (spec Part 2): the publication gate freezes refs, durable
+    // state, and runtime-snapshot publication for the full mark+sweep. Branch
+    // and checkpoint locks are held only while taking the live in-memory root
+    // snapshot, then released so ordinary FUSE mutations can continue. Fresh
+    // object publication is protected by the age fence and ObjectStore's
+    // publish/remove serialization.
+    GcResult run_gc(const GcPolicy& policy);
+    // Same freeze as run_gc so verify sees a consistent root set, then mark
+    // and check every marked object exists.
+    GcResult verify_gc(const GcPolicy& policy);
 
     const std::string& source_root() const { return source_root_; }
     const std::string& mount_point() const { return mount_point_; }
@@ -201,6 +241,10 @@ private:
     ObjectStore store_;
     Refs refs_;
     CheckpointManager cm_;
+    // Serializes durable graph publication against GC without serializing
+    // ordinary FUSE mutations. Recursive because runtime restore routes through
+    // rollback_branch_to_commit(), which is itself a public publisher.
+    std::recursive_mutex gc_publish_mu_;
     // Declared after cm_ (which itself follows store_) so it constructs after
     // the ObjectStore it references and destructs before it. Member init-list
     // position mirrors this declaration order.

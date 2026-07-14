@@ -16,20 +16,41 @@ Refs::Refs(const std::string& store_root)
     : refs_dir_(store_root + "/refs")
 {}
 
-std::vector<std::string> Refs::list_refs() const {
-    std::vector<std::string> names;
+bool Refs::list_refs(std::vector<std::string>& names, std::string& error) const {
+    names.clear();
+    error.clear();
     std::error_code ec;
-    // directory_iterator already skips "." / "..". Use the error_code
-    // overload so a missing/permission-denied refs dir doesn't throw.
-    for (auto it = fs::directory_iterator(refs_dir_, ec);
-         !ec && it != fs::directory_iterator(); it.increment(ec))
-    {
+    fs::directory_iterator it(refs_dir_, ec);
+    if (ec) {
+        error = "enumerate refs directory failed: " + ec.message();
+        return false;
+    }
+    for (; it != fs::directory_iterator(); it.increment(ec)) {
+        if (ec) break;
         std::error_code rec;
-        if (!it->is_regular_file(rec)) continue;
+        bool regular = it->is_regular_file(rec);
+        if (rec) {
+            error = "inspect ref entry failed: " + rec.message();
+            names.clear();
+            return false;
+        }
+        if (!regular) continue;
         names.push_back(it->path().filename().string());
+    }
+    if (ec) {
+        error = "enumerate refs directory failed: " + ec.message();
+        names.clear();
+        return false;
     }
 
     std::sort(names.begin(), names.end());
+    return true;
+}
+
+std::vector<std::string> Refs::list_refs() const {
+    std::vector<std::string> names;
+    std::string error;
+    (void)list_refs(names, error);
     return names;
 }
 
@@ -37,12 +58,19 @@ bool Refs::read_ref(const std::string& branch, Hash& out) const {
     std::string path = refs_dir_ + "/" + branch;
     int fd = open(path.c_str(), O_RDONLY | O_BINARY);
     if (fd < 0) return false;
-    char buf[65];
-    ssize_t n = read(fd, buf, 64);
-    close(fd);
-    if (n < 64) return false;
-    buf[64] = '\0';
-    return hex_to_hash(buf, out);
+    char buf[66];
+    size_t used = 0;
+    while (used < sizeof(buf)) {
+        ssize_t n = read(fd, buf + used, sizeof(buf) - used);
+        if (n < 0 && errno == EINTR) continue;
+        if (n <= 0) break;
+        used += static_cast<size_t>(n);
+    }
+    int close_rc = close(fd);
+    // The durable ref format is exactly 64 lower/upper hex digits plus LF.
+    // Reading one extra byte makes trailing garbage fail closed.
+    if (close_rc != 0 || used != 65 || buf[64] != '\n') return false;
+    return hex_to_hash_strict(std::string(buf, 64), out);
 }
 
 bool Refs::write_ref(const std::string& branch, const Hash& commit_hash,

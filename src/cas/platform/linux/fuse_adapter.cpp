@@ -119,6 +119,8 @@ static int cas_getattr(const char* path, struct stat* st, struct fuse_file_info*
     }
 
     std::unique_lock<std::mutex> lk(br->checkpoint_mu);
+    if (br->retired) return -ESTALE;
+    if (s && s->stale) return -ESTALE;
     auto entry = br->wt.lookup(path);
     if (!entry) return -ENOENT;
 
@@ -184,6 +186,7 @@ static int cas_open(const char* path, struct fuse_file_info* fi) {
     auto br = resolve_branch(d);
     {
         std::lock_guard<std::mutex> lk(br->checkpoint_mu);
+        if (br->retired) return -ESTALE;
         auto entry = br->wt.lookup(path);
         if (!entry) return -ENOENT;
         if (entry->kind != EntryKind::Blob) return -EISDIR;
@@ -241,6 +244,7 @@ static int cas_create(const char* path, mode_t mode, struct fuse_file_info* fi) 
     auto br = resolve_branch(d);
     {
         std::lock_guard<std::mutex> lk(br->checkpoint_mu);
+        if (br->retired) return -ESTALE;
         Hash empty = d->store().write_blob(nullptr, 0);
         br->wt.insert(path, {EntryKind::Blob, empty, (uint32_t)(mode & 07777) | 0100000});
 
@@ -269,6 +273,7 @@ static int cas_read(const char*, char* buf, size_t size, off_t offset,
     // Serialize against the branch's checkpoint flush, concurrent
     // write-buffer mutations, and stale-handle invalidation.
     std::lock_guard<std::mutex> lk(br->checkpoint_mu);
+    if (br->retired) return -ESTALE;
     if (s->stale) return -ESTALE;
     d->ensure_base_cache(*s);
     size_t n = s->write_buf->read((uint64_t)offset, (uint8_t*)buf, size, s->base_cache);
@@ -282,6 +287,7 @@ static int cas_write(const char*, const char* buf, size_t size, off_t offset,
     if (!s) return -EBADF;
     auto br = branch_for_fh(d, s);
     std::lock_guard<std::mutex> lk(br->checkpoint_mu);
+    if (br->retired) return -ESTALE;
     if (s->stale) return -ESTALE;
     // First mutation on this handle: once it mutates it must never again serve
     // reads from the immutable blob fd (which would miss in-flight writes).
@@ -298,6 +304,7 @@ static int cas_flush(const char*, struct fuse_file_info* fi) {
     // Serialize against the branch's checkpoint flush, concurrent
     // write-buffer mutations, and stale-handle invalidation.
     std::lock_guard<std::mutex> lk(br->checkpoint_mu);
+    if (br->retired) return -ESTALE;
     if (s->stale) return -ESTALE;
     if (!s->write_buf || !s->write_buf->is_dirty()) return 0;
 
@@ -365,6 +372,7 @@ static int cas_truncate(const char* path, off_t length, struct fuse_file_info* f
         if (!s) return -EBADF;
         auto br = branch_for_fh(d, s);
         std::lock_guard<std::mutex> lk(br->checkpoint_mu);
+        if (br->retired) return -ESTALE;
         if (s->stale) return -ESTALE;
         // Same mutation rule as cas_write: truncate forfeits fd-backed reads.
         s->fd_read_eligible = false;
@@ -374,6 +382,7 @@ static int cas_truncate(const char* path, off_t length, struct fuse_file_info* f
 
     auto br = resolve_branch(d);
     std::lock_guard<std::mutex> lk(br->checkpoint_mu);
+    if (br->retired) return -ESTALE;
     auto entry = br->wt.lookup(path);
     if (!entry) return -ENOENT;
     if (entry->kind != EntryKind::Blob) return -EISDIR;
@@ -426,6 +435,7 @@ static int cas_unlink(const char* path) {
     if (auto* bs = d->bootstrap()) bs->ensure_path(path);
     auto br = resolve_branch(d);
     std::lock_guard<std::mutex> lk(br->checkpoint_mu);
+    if (br->retired) return -ESTALE;
     auto e = br->wt.lookup(path);
     if (!e) return -ENOENT;
     if (e->kind == EntryKind::Tree) return -EISDIR;
@@ -440,6 +450,7 @@ static int cas_rmdir(const char* path) {
     if (auto* bs = d->bootstrap()) bs->ensure_path(path);
     auto br = resolve_branch(d);
     std::lock_guard<std::mutex> lk(br->checkpoint_mu);
+    if (br->retired) return -ESTALE;
     auto e = br->wt.lookup(path);
     if (!e) return -ENOENT;
     if (e->kind != EntryKind::Tree) return -ENOTDIR;
@@ -456,6 +467,7 @@ static int cas_mkdir(const char* path, mode_t mode) {
     if (auto* bs = d->bootstrap()) bs->ensure_path(path);
     auto br = resolve_branch(d);
     std::lock_guard<std::mutex> lk(br->checkpoint_mu);
+    if (br->retired) return -ESTALE;
     if (br->wt.lookup(path)) return -EEXIST;
     br->wt.insert(path, {EntryKind::Tree, ZERO_HASH, (uint32_t)(mode & 07777) | 040000});
     return 0;
@@ -469,6 +481,7 @@ static int cas_rename(const char* from, const char* to, unsigned int flags) {
     if (auto* bs = d->bootstrap()) { bs->ensure_path(from); bs->ensure_path(to); }
     auto br = resolve_branch(d);
     std::lock_guard<std::mutex> lk(br->checkpoint_mu);
+    if (br->retired) return -ESTALE;
     auto e = br->wt.lookup(from);
     if (!e) return -ENOENT;
 
@@ -487,6 +500,7 @@ static int cas_symlink(const char* target, const char* linkpath) {
     if (auto* bs = d->bootstrap()) bs->ensure_path(linkpath);
     auto br = resolve_branch(d);
     std::lock_guard<std::mutex> lk(br->checkpoint_mu);
+    if (br->retired) return -ESTALE;
     if (br->wt.lookup(linkpath)) return -EEXIST;
     size_t tlen = std::strlen(target);
     Hash link_blob = d->store().write_blob((const uint8_t*)target, tlen);
@@ -534,6 +548,7 @@ static int cas_chmod(const char* path, mode_t mode, struct fuse_file_info* fi) {
     if (auto* bs = d->bootstrap()) bs->ensure_path(path);
     auto br = resolve_branch(d);
     std::lock_guard<std::mutex> lk(br->checkpoint_mu);
+    if (br->retired) return -ESTALE;
     auto entry = br->wt.lookup(path);
     if (!entry) return -ENOENT;
     entry->mode = (entry->mode & S_IFMT) | (mode & 07777);
@@ -652,6 +667,7 @@ static int cas_read_buf(const char*, struct fuse_bufvec** out, size_t size,
     if (!s) return -EBADF;
     auto br = branch_for_fh(d, s);
     std::lock_guard<std::mutex> lk(br->checkpoint_mu);
+    if (br->retired) return -ESTALE;
     if (s->stale) return -ESTALE;
     if (offset < 0) return -EINVAL;
     if (s->fd_read_eligible)

@@ -1,6 +1,7 @@
 #pragma once
 #include "hash.h"
 #include <cstdint>
+#include <functional>
 #include <mutex>
 #include <set>
 #include <shared_mutex>
@@ -37,6 +38,12 @@ private:
 
 class ObjectStore {
 public:
+    enum class RemoveResult {
+        Removed,
+        Skipped,
+        Error,
+    };
+
     explicit ObjectStore(const std::string& store_root);
 
     bool init_layout();
@@ -49,10 +56,11 @@ public:
 
     // Header-validated payload size for a blob, served from a bounded
     // in-memory cache after the first query. Blobs are content-addressed
-    // and immutable, and published objects are never deleted, so cached
-    // sizes never invalidate. Errors (missing/corrupt objects) are
-    // re-probed on every call, never cached. Returns 0 and fills size_out,
-    // or a positive errno exactly like open_blob.
+    // and immutable; published objects are deleted only by GC sweep, which
+    // clears this cache via clear_size_cache(), so cached sizes are valid
+    // between sweeps. Errors (missing/corrupt objects) are re-probed on
+    // every call, never cached. Returns 0 and fills size_out, or a
+    // positive errno exactly like open_blob.
     int blob_payload_size(const Hash& hash, uint64_t& size_out) const;
 
     Hash write_tree(const std::vector<uint8_t>& serialized);
@@ -87,6 +95,37 @@ public:
     void restore_pending(const std::vector<Hash>& hashes);
     size_t pending_count() const;
 
+    // ---------- GC primitives (enumeration + removal + cache control) ----------
+    // These power the GcRunner (mark/sweep). They never mutate the pending
+    // set — drain_pending() remains checkpoint-only.
+
+    // Read-only copy of the pending set (objects written but not yet made
+    // durable/drained). GC marks these as roots; it must NOT drain them —
+    // drain_pending() remains checkpoint-only.
+    std::vector<Hash> pending_snapshot() const;
+
+    // Invalidate the blob-size cache. Called by GC after a sweep: the cache's
+    // "published objects are never deleted" assumption holds only BETWEEN
+    // sweeps.
+    void clear_size_cache();
+
+    // Iterate every object file in the store: cb(hash, file_size_bytes,
+    // mtime_epoch_seconds). Skips non-64-hex filenames. Returns false with
+    // `error` set only on directory enumeration failure; per-file stat
+    // failures skip the file (it may have been renamed-in concurrently).
+    bool for_each_object(
+        const std::function<void(const Hash&, uint64_t, int64_t)>& cb,
+        std::string& error) const;
+
+    // Re-stat and remove an object while synchronized with object publication
+    // and dedup adoption. Removes only when st_mtime is strictly less than
+    // age_fence_epoch_seconds. A too-new, missing, or pending-publication
+    // object returns Skipped; filesystem failures return Error with `error`
+    // set.
+    RemoveResult remove_object_if_older_than(
+        const Hash& hash, int64_t age_fence_epoch_seconds,
+        std::string& error);
+
 private:
     Hash write_object(const char* type_tag, const uint8_t* body, size_t body_len);
     bool read_object(const Hash& hash, const char* expected_tag, std::vector<uint8_t>& out);
@@ -96,6 +135,8 @@ private:
     std::string objects_dir_;
     std::string tmp_dir_;
 
+    // Also serializes the target-path publication/adoption/removal handshake.
+    // Temporary-file creation and writes happen outside this mutex.
     mutable std::mutex pending_mu_;
     std::set<Hash> pending_;
 

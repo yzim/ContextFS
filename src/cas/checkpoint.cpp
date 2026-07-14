@@ -181,8 +181,14 @@ RollbackResult CheckpointManager::rollback_locked(
     if (!deserialize_commit(body, cd))
         return {false, ZERO_HASH, "failed to parse target commit"};
 
-    if (!rebuild_working_tree(cd.tree_hash, store_, wt))
-        return {false, ZERO_HASH, "failed to rebuild working tree"};
+    std::string rebuild_error;
+    if (!rebuild_working_tree(cd.tree_hash, store_, wt, &rebuild_error)) {
+        // A missing tree object under a resolvable commit means retention
+        // swept this snapshot's data (spec Part 2 normative error).
+        if (rebuild_error.rfind("tree object missing", 0) == 0)
+            return {false, ZERO_HASH, "checkpoint compacted by retention policy"};
+        return {false, ZERO_HASH, "failed to rebuild working tree: " + rebuild_error};
+    }
 
     invalidate_fhs_fn();
 

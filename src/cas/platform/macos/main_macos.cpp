@@ -99,7 +99,7 @@ int main(int argc, char** argv) {
     }
     auto bs = std::make_unique<cas::Bootstrap>(
         ca.source, daemon.store(), daemon.working_tree(),
-        daemon.inode_map());
+        daemon.inode_map(), daemon.checkpoint_mutex());
     bs->ensure_path("/");
     bs->start_background();
     daemon.set_bootstrap(std::move(bs));

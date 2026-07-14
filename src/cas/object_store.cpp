@@ -8,6 +8,7 @@
 #include <limits>
 #include <random>
 #include <set>
+#include <sys/stat.h>
 #include <utility>
 
 namespace cas {
@@ -154,7 +155,24 @@ Hash ObjectStore::write_object(const char* type_tag, const uint8_t* body, size_t
     Hash hash;
     blake3_hasher_finalize(&hasher, hash.data(), BLAKE3_OUT_LEN);
 
-    if (object_exists(hash)) return hash;
+    const std::string target = object_path(hash);
+
+    // A dedup hit is an adoption by this writer. Refresh its mtime while
+    // holding the same mutex used by age-fenced removal, so either the writer
+    // refreshes first and removal observes a fresh object, or removal wins and
+    // this write falls through to republish the object.
+    {
+        std::lock_guard<std::mutex> lk(pending_mu_);
+        std::error_code ec;
+        fs::last_write_time(target, fs::file_time_type::clock::now(), ec);
+        if (!ec) return hash;
+        if (ec != std::errc::no_such_file_or_directory) {
+            set_last_error(std::string("write ") + type_tag +
+                           " object: refresh existing object '" + target +
+                           "' failed: " + ec.message());
+            return ZERO_HASH;
+        }
+    }
 
     std::string shard = objects_dir_ + "/" + hash_to_hex(hash).substr(0, 2);
     {
@@ -198,21 +216,38 @@ Hash ObjectStore::write_object(const char* type_tag, const uint8_t* body, size_t
         return ZERO_HASH;
     }
 
-    std::string target = object_path(hash);
-    std::error_code rec;
-    fs::rename(tmp_path, target, rec);
-    if (rec) {
-        std::error_code rmec;
-        fs::remove(tmp_path, rmec);
-        set_last_error(std::string("write ") + type_tag +
-                       " object: rename('" + tmp_path +
-                       "', '" + target +
-                       "') failed: " + rec.message());
-        return ZERO_HASH;
-    }
-
     {
         std::lock_guard<std::mutex> lk(pending_mu_);
+
+        // Another writer may have published the same hash while this thread
+        // wrote its temporary file. Adopt that object instead of replacing it.
+        std::error_code adopt_ec;
+        fs::last_write_time(target, fs::file_time_type::clock::now(), adopt_ec);
+        if (!adopt_ec) {
+            std::error_code rmec;
+            fs::remove(tmp_path, rmec);
+            return hash;
+        }
+        if (adopt_ec != std::errc::no_such_file_or_directory) {
+            std::error_code rmec;
+            fs::remove(tmp_path, rmec);
+            set_last_error(std::string("write ") + type_tag +
+                           " object: refresh existing object '" + target +
+                           "' failed: " + adopt_ec.message());
+            return ZERO_HASH;
+        }
+
+        std::error_code rename_ec;
+        fs::rename(tmp_path, target, rename_ec);
+        if (rename_ec) {
+            std::error_code rmec;
+            fs::remove(tmp_path, rmec);
+            set_last_error(std::string("write ") + type_tag +
+                           " object: rename('" + tmp_path +
+                           "', '" + target +
+                           "') failed: " + rename_ec.message());
+            return ZERO_HASH;
+        }
         pending_.insert(hash);
     }
     return hash;
@@ -233,6 +268,85 @@ void ObjectStore::restore_pending(const std::vector<Hash>& hashes) {
 size_t ObjectStore::pending_count() const {
     std::lock_guard<std::mutex> lk(pending_mu_);
     return pending_.size();
+}
+
+std::vector<Hash> ObjectStore::pending_snapshot() const {
+    std::lock_guard<std::mutex> lk(pending_mu_);
+    return std::vector<Hash>(pending_.begin(), pending_.end());
+}
+
+void ObjectStore::clear_size_cache() {
+    std::unique_lock<std::shared_mutex> lk(size_cache_mu_);
+    size_cache_.clear();
+}
+
+bool ObjectStore::for_each_object(
+    const std::function<void(const Hash&, uint64_t, int64_t)>& cb,
+    std::string& error) const {
+    // Mirror the file's directory_iterator(dir, ec) + increment(ec) idiom
+    // (see cleanup_tmp / validate_object_shards_writable). The store layout
+    // is objects/<2-hex shard>/<64-hex object>.
+    std::error_code ec;
+    for (auto shard = fs::directory_iterator(objects_dir_, ec);
+         !ec && shard != fs::directory_iterator(); shard.increment(ec)) {
+        std::error_code sec;
+        if (!shard->is_directory(sec)) continue;
+        for (auto obj = fs::directory_iterator(shard->path(), sec);
+             !sec && obj != fs::directory_iterator(); obj.increment(sec)) {
+            std::string name = obj->path().filename().string();
+            Hash h;
+            // Skip stray non-object filenames (length != 64 hex chars).
+            if (name.size() != 64 || !hex_to_hash(name.c_str(), h)) continue;
+            struct stat st;
+            // Per-file stat failure (e.g. racing rename) skips the file;
+            // only directory-enumeration failure aborts with an error.
+            if (::stat(obj->path().c_str(), &st) != 0) continue;
+            cb(h, static_cast<uint64_t>(st.st_size),
+               static_cast<int64_t>(st.st_mtime));
+        }
+        if (sec) {
+            error = "enumerate shard failed: " + sec.message();
+            return false;
+        }
+    }
+    if (ec) {
+        error = "enumerate objects dir failed: " + ec.message();
+        return false;
+    }
+    return true;
+}
+
+ObjectStore::RemoveResult ObjectStore::remove_object_if_older_than(
+    const Hash& hash, int64_t age_fence_epoch_seconds, std::string& error) {
+    error.clear();
+    const std::string path = object_path(hash);
+    std::lock_guard<std::mutex> lk(pending_mu_);
+
+    // A publication that raced the mark phase is not in the mark snapshot.
+    // Keep it regardless of wall-clock granularity; after pending is drained,
+    // its fresh publication mtime still protects it from the earlier fence.
+    if (pending_.count(hash) != 0) return RemoveResult::Skipped;
+
+    struct stat st;
+    if (::stat(path.c_str(), &st) != 0) {
+        const int saved = errno;
+        if (saved == ENOENT || saved == ENOTDIR) return RemoveResult::Skipped;
+        error = "stat object '" + path + "' before removal failed: " +
+                std::strerror(saved);
+        return RemoveResult::Error;
+    }
+    if (static_cast<int64_t>(st.st_mtime) >= age_fence_epoch_seconds)
+        return RemoveResult::Skipped;
+
+    std::error_code ec;
+    const bool removed = fs::remove(path, ec);
+    if (ec) {
+        if (ec == std::errc::no_such_file_or_directory)
+            return RemoveResult::Skipped;
+        error = "remove object '" + path + "' failed: " + ec.message();
+        return RemoveResult::Error;
+    }
+    return removed ? RemoveResult::Removed : RemoveResult::Skipped;
 }
 
 bool ObjectStore::read_object(const Hash& hash, const char* expected_tag, std::vector<uint8_t>& out) {

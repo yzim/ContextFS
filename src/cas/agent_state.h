@@ -53,6 +53,10 @@ struct AgentStateRecord {
     std::string payload_schema;
     std::string payload_inline;
     std::string payload_ref;
+    // CAS objects needed to interpret or restore this state. Serialized as
+    // repeatable dependency_hash=<hex> lines; legacy records that omit those
+    // lines deserialize to an empty vector.
+    std::vector<Hash> dependency_hashes;
     uint64_t timestamp_ns = 0;
     bool boundary = false;
 };
@@ -70,12 +74,13 @@ bool deserialize_agent_state_record(const std::vector<uint8_t>& body,
 bool parse_agent_state_kind(const std::string& text, AgentStateKind& out);
 const char* agent_state_kind_label(AgentStateKind kind);
 
-// Writes the serialized record to the CAS as a blob, assigns
-// `state.state_id` from the returned blob hash, and (when `sync` is true)
-// publishes the dependency hashes together with the state blob via
-// `fsync_pending` so the state and its referenced objects become durable as
-// one set. Returns ZERO_HASH and sets `error` if any dependency hash is
-// ZERO_HASH, if the blob write fails, or if the synced publish fails.
+// Writes the serialized record to the CAS as a blob, persists
+// `dependency_hashes` in its body, and assigns `state.state_id` from the
+// returned blob hash. When `sync` is true, publishes those same hashes together
+// with the state blob via `fsync_pending` so the state and its referenced
+// objects become durable as one set. Returns ZERO_HASH and sets `error` if any
+// dependency hash is ZERO_HASH, if the blob write fails, or if the synced
+// publish fails.
 Hash write_agent_state_record(ObjectStore& store,
                               AgentStateRecord& state,
                               const std::vector<Hash>& dependency_hashes,

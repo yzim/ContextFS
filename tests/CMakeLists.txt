@@ -48,6 +48,12 @@ endif()
 add_executable(cas_test_working_tree unit/test_working_tree.cpp)
 target_link_libraries(cas_test_working_tree PRIVATE cas_core)
 
+add_executable(cas_test_working_tree_delta unit/test_working_tree_delta.cpp)
+target_link_libraries(cas_test_working_tree_delta PRIVATE cas_core)
+
+add_executable(cas_test_tree_rebuild unit/test_tree_rebuild.cpp)
+target_link_libraries(cas_test_tree_rebuild PRIVATE cas_core)
+
 add_executable(cas_test_write_buffer unit/test_write_buffer.cpp)
 target_link_libraries(cas_test_write_buffer PRIVATE cas_core)
 
@@ -135,6 +141,15 @@ target_link_libraries(cas_test_agent_state_control PRIVATE cas_core Threads::Thr
 if(AGENTVFS_EBPF)
     target_link_libraries(cas_test_agent_state_control PRIVATE ${LIBBPF_LIBRARIES} elf z)
 endif()
+
+add_executable(cas_test_stats_memory unit/test_stats_memory.cpp)
+target_link_libraries(cas_test_stats_memory PRIVATE cas_core)
+
+add_executable(cas_test_gc unit/test_gc.cpp)
+target_link_libraries(cas_test_gc PRIVATE cas_core)
+
+add_executable(cas_test_gc_control unit/test_gc_control.cpp)
+target_link_libraries(cas_test_gc_control PRIVATE cas_core)
 endif() # UNIX
 
 add_executable(cas_test_telemetry_event unit/test_telemetry_event.cpp ../src/cas/telemetry_event.cpp)
@@ -275,3 +290,64 @@ target_compile_options(cas_test_fuse_read_buffer PRIVATE
 target_link_libraries(cas_test_fuse_read_buffer PRIVATE
     cas_core ${FUSE3_LIBRARIES})
 endif() # LINUX
+
+# Every target below is a self-contained executable test. Keep the inventory
+# target-based so platform/feature guards above decide what CTest sees.
+# cas_test_fh_lifecycle is intentionally excluded: its executable requires a
+# live mountpoint and control-socket path supplied by test_cas_fh_lifecycle.sh.
+set(AGENTVFS_STANDALONE_TEST_TARGETS
+    cas_test_named_pipe_channel
+    cas_test_win_helpers
+    cas_test_workspace_cli
+    cas_test_fuse_t_preflight
+    cas_test_working_tree
+    cas_test_working_tree_delta
+    cas_test_tree_rebuild
+    cas_test_write_buffer
+    cas_test_branch_router
+    cas_test_cgroup_watch
+    cas_test_object_store
+    cas_test_branch_context
+    cas_test_branch_merge
+    cas_test_runtime_state
+    cas_test_agent_state
+    cas_test_agent_state_service
+    cas_test_runtime_supervisor
+    cas_test_runtime_process_posix
+    cas_test_branch_merge_commit
+    cas_test_branch_merge_daemon
+    cas_test_branch_persistence
+    cas_test_runtime_control
+    cas_test_agent_state_control
+    cas_test_stats_memory
+    cas_test_gc
+    cas_test_gc_control
+    cas_test_telemetry_event
+    cas_test_telemetry_registry
+    cas_test_blake3_simd
+    cas_test_cgroup_watch_kernfs
+    cas_test_ebpf_backend
+    cas_test_routing_fence_exit
+    cas_test_fanotify_backend
+    cas_test_ptrace_backend
+    cas_test_ldpreload_backend
+    cas_test_bpftime_backend
+    cas_test_wasm_backend
+    cas_test_lua_backend
+    cas_test_ldpreload_preload
+    cas_test_fuse_read_buffer)
+
+foreach(test_target IN LISTS AGENTVFS_STANDALONE_TEST_TARGETS)
+    if(TARGET ${test_target})
+        add_test(NAME ${test_target} COMMAND $<TARGET_FILE:${test_target}>)
+    endif()
+endforeach()
+
+if(TARGET cas_test_cgroup_watch_kernfs)
+    set_tests_properties(cas_test_cgroup_watch_kernfs PROPERTIES
+        SKIP_RETURN_CODE 77)
+endif()
+if(TARGET cas_test_routing_fence_exit)
+    set_tests_properties(cas_test_routing_fence_exit PROPERTIES
+        SKIP_RETURN_CODE 77)
+endif()

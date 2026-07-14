@@ -1,6 +1,8 @@
 cmake_minimum_required(VERSION 3.16)
 project(agentvfs LANGUAGES C CXX)
 
+enable_testing()
+
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -111,6 +113,7 @@ endif()
 # ── cas_core static library (always built) ─────────────────────────
 set(CAS_CORE_PORTABLE_SOURCES
     src/cas/object_store.cpp
+    src/cas/gc.cpp
     src/cas/refs.cpp
     src/cas/working_tree.cpp
     src/cas/write_buffer.cpp

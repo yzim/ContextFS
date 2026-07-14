@@ -122,6 +122,17 @@ bool assign_state_id_field(std::string& dst, const std::string& value,
     return true;
 }
 
+bool append_dependency_hash(AgentStateRecord& state, const std::string& value,
+                            std::string& error) {
+    Hash dependency;
+    if (!hex_to_hash_strict(value, dependency) || dependency == ZERO_HASH) {
+        error = "invalid dependency_hash";
+        return false;
+    }
+    state.dependency_hashes.push_back(dependency);
+    return true;
+}
+
 // Dispatches a single decoded key/value pair into `state`. Unknown keys are
 // ignored so that future record versions can add fields without breaking
 // older readers.
@@ -184,6 +195,9 @@ bool assign_field(AgentStateRecord& state, const std::string& key,
     if (key == "payload_ref") {
         return assign_state_id_field(state.payload_ref, value,
                                      "payload_ref", error);
+    }
+    if (key == "dependency_hash") {
+        return append_dependency_hash(state, value, error);
     }
     if (key == "timestamp_ns") {
         return parse_u64(value, state.timestamp_ns, error);
@@ -266,6 +280,11 @@ std::vector<uint8_t> serialize_agent_state_record(const AgentStateRecord& state)
     s += "payload_ref=";
     s += percent_encode(state.payload_ref);
     s += "\n";
+    for (const Hash& dependency : state.dependency_hashes) {
+        s += "dependency_hash=";
+        s += hash_to_hex(dependency);
+        s += "\n";
+    }
     s += "timestamp_ns=";
     s += std::to_string(state.timestamp_ns);
     s += "\n";
@@ -336,7 +355,12 @@ Hash write_agent_state_record(ObjectStore& store,
             return ZERO_HASH;
         }
     }
-    std::vector<uint8_t> body = serialize_agent_state_record(state);
+    // The publication list is authoritative: serialize exactly the hashes
+    // that a synced write will publish, rather than trusting a potentially
+    // stale dependency list already present on a reused record value.
+    AgentStateRecord persisted = state;
+    persisted.dependency_hashes = dependency_hashes;
+    std::vector<uint8_t> body = serialize_agent_state_record(persisted);
     AgentStateRecord checked;
     if (!deserialize_agent_state_record(body, checked, error)) {
         error = "invalid agent state record: " + error;
@@ -366,6 +390,7 @@ Hash write_agent_state_record(ObjectStore& store,
     // Only stamp state_id once the entire write (blob + optional sync) has
     // succeeded, so "returns ZERO_HASH" stays equivalent to "`state` is
     // effectively unmodified w.r.t. state_id".
+    state.dependency_hashes = dependency_hashes;
     state.state_id = hash_to_hex(state_hash);
     return state_hash;
 }

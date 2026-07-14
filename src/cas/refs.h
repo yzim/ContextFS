@@ -14,6 +14,14 @@ public:
                    const std::string& tmp_dir);
     bool remove_ref(const std::string& branch);
 
+    // Error-reporting enumeration used by correctness-sensitive callers such
+    // as GC. On failure `names` is cleared and `error` describes the scan
+    // failure, so callers cannot mistake a partial result for no roots.
+    bool list_refs(std::vector<std::string>& names, std::string& error) const;
+
+    // Compatibility wrapper for callers whose existing contract cannot
+    // surface enumeration errors. New root-discovery code should use the
+    // error-reporting overload above.
     std::vector<std::string> list_refs() const;
 
     // Backward-compatible wrappers

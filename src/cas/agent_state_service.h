@@ -12,10 +12,11 @@ namespace cas {
 
 // Inputs to AgentStateService::append(). The caller fills the record (including
 // agent_id, branch, parent/snapshot anchors and payload fields). When `sync` is
-// true, the service makes explicit dependency_hashes durable alongside the
-// state blob and also derives the blob dependency behind record.payload_ref.
-// `sync=false` appends are logical-only: they are describable by `state_id` but
-// do not publish a latest ref or fsync their dependencies.
+// The service persists the stable, de-duplicated union of explicit
+// dependency_hashes and the blob dependency derived from record.payload_ref.
+// When `sync` is true, that same effective set is made durable alongside the
+// state blob. `sync=false` appends remain logical-only: they are describable by
+// `state_id` but do not publish a latest ref or fsync their dependencies.
 struct AgentStateAppendRequest {
     AgentStateRecord record;
     std::vector<Hash> dependency_hashes;
@@ -61,11 +62,11 @@ class AgentStateService {
 public:
     explicit AgentStateService(ObjectStore& store);
 
-    // Writes the record (and, when sync=true, fsyncs its dependencies plus the
-    // state blob together) and publishes the latest ref. Validates `agent_id`,
-    // `branch`, all hash-shaped fields, and — for sync=true only — that
-    // parent_state_id and snapshot_base_state_id are present and reference
-    // readable state objects.
+    // Writes the record with its effective dependency set (and, when sync=true,
+    // fsyncs those dependencies plus the state blob together) and publishes
+    // the latest ref. Validates `agent_id`, `branch`, all hash-shaped fields,
+    // and — for sync=true only — that parent_state_id and
+    // snapshot_base_state_id are present and reference readable state objects.
     AgentStateAppendResult append(const AgentStateAppendRequest& req);
 
     // Loads a state by its hex CAS id.

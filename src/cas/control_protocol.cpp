@@ -64,6 +64,20 @@ std::string json_err(const std::string& msg) {
     return "{\"ok\":false,\"error\":\"" + json_escape(msg) + "\"}";
 }
 
+bool parse_positive_u32_decimal(const std::string& text, uint32_t& out) {
+    if (text.empty()) return false;
+    uint64_t value = 0;
+    for (char c : text) {
+        if (c < '0' || c > '9') return false;
+        const uint64_t digit = static_cast<uint64_t>(c - '0');
+        if (value > (UINT32_MAX - digit) / 10) return false;
+        value = value * 10 + digit;
+    }
+    if (value == 0) return false;
+    out = static_cast<uint32_t>(value);
+    return true;
+}
+
 std::string json_conflict_response(const std::vector<std::string>& conflicts) {
     std::string out = "{\"ok\":false,\"error\":\"merge conflicts\",\"conflicts\":[";
     for (size_t i = 0; i < conflicts.size(); i++) {
@@ -713,6 +727,27 @@ std::string dispatch(Daemon& daemon,
         return buf;
     }
 
+    if (cmd == "stats.memory") {
+        auto ms = daemon.collect_memory_stats();
+        std::string out = "{\"ok\":true,\"daemon_rss_kb\":" +
+                          std::to_string(ms.rss_kb) +
+                          ",\"rss_kb\":" + std::to_string(ms.rss_kb) +
+            ",\"write_buffers\":{\"count\":" + std::to_string(ms.write_buffer_count) +
+            ",\"dirty_bytes\":" + std::to_string(ms.write_buffer_dirty_bytes) +
+            "},\"branches\":[";
+        for (size_t i = 0; i < ms.branches.size(); i++) {
+            const auto& b = ms.branches[i];
+            if (i) out += ",";
+            out += "{\"name\":\"" + json_escape(b.name) + "\"" +
+                   ",\"base_entries\":" + std::to_string(b.base_entries) +
+                   ",\"base_shared_by\":" + std::to_string(b.base_shared_by) +
+                   ",\"delta_entries\":" + std::to_string(b.delta_entries) +
+                   ",\"delta_tombstones\":" + std::to_string(b.delta_tombstones) + "}";
+        }
+        out += "]}";
+        return out;
+    }
+
     if (cmd == "telemetry.status") {
         std::string json = "{\"backends\":[";
         TelemetryRegistry* registry = daemon.registry();
@@ -863,7 +898,7 @@ std::string dispatch(Daemon& daemon,
         req.record.timestamp_ns = static_cast<uint64_t>(tns);
         if (extract_bool(rest, "boundary", false)) req.record.boundary = true;
         req.sync = extract_bool(rest, "sync", false);
-        auto res = daemon.agent_state().append(req);
+        auto res = daemon.append_agent_state(req);
         if (!res.ok) {
             // Partial success: the state blob was made durable (fsync'd by
             // write_agent_state_record) but the latest-ref publish failed. The
@@ -1521,6 +1556,62 @@ std::string dispatch(Daemon& daemon,
                 rid, token, pid, apgid, generation, error))
             return json_err(error);
         return "{\"ok\":true}";
+    }
+
+    // gc.run / gc.verify [keep_last=N] [keep_label=<exact>]... [dry_run=0|1]
+    //
+    // Runs offline GC (mark + age-fenced sweep, or mark + existence check)
+    // under the daemon's GC locks. Token syntax is key=value with no quoting,
+    // so keep_label values cannot contain whitespace (acceptable — pinned
+    // labels are machine-generated identifiers). keep_label may repeat.
+    if (cmd == "gc.run" || cmd == "gc.verify") {
+        GcPolicy pol;
+        std::string tok;
+        while (iss >> tok) {
+            if (tok.rfind("keep_last=", 0) == 0) {
+                uint32_t keep_last = 0;
+                if (!parse_positive_u32_decimal(tok.substr(10), keep_last))
+                    return json_err("invalid keep_last: expected positive u32");
+                pol.keep_last = keep_last;
+            } else if (tok.rfind("keep_label=", 0) == 0) {
+                std::string label = tok.substr(11);
+                if (label.empty())
+                    return json_err("invalid keep_label: expected non-empty label");
+                pol.keep_labels.push_back(std::move(label));
+            } else if (tok.rfind("dry_run=", 0) == 0) {
+                std::string value = tok.substr(8);
+                if (value != "0" && value != "1")
+                    return json_err("invalid dry_run: expected 0 or 1");
+                pol.dry_run = value == "1";
+            } else {
+                return json_err("unknown gc arg: " + tok);
+            }
+        }
+        GcResult r = (cmd == "gc.run") ? daemon.run_gc(pol)
+                                       : daemon.verify_gc(pol);
+        std::string out = std::string("{\"ok\":") + (r.ok ? "true" : "false");
+        if (!r.error.empty()) out += ",\"error\":\"" + json_escape(r.error) + "\"";
+        out += ",\"dry_run\":" + std::string(pol.dry_run ? "true" : "false") +
+            ",\"roots\":{\"branches\":" + std::to_string(r.roots_branches) +
+            ",\"state_refs\":" + std::to_string(r.roots_state_refs) +
+            ",\"runtime_states\":" + std::to_string(r.roots_runtime_states) + "}" +
+            ",\"marked_objects\":" + std::to_string(r.marked_objects) +
+            ",\"marked_bytes\":" + std::to_string(r.marked_bytes) +
+            ",\"swept_objects\":" + std::to_string(r.swept_objects) +
+            ",\"swept_bytes\":" + std::to_string(r.swept_bytes) +
+            ",\"sweep_errors\":" + std::to_string(r.sweep_errors) +
+            ",\"compacted_commits\":" + std::to_string(r.compacted_commits) +
+            ",\"missing_objects\":" + std::to_string(r.missing_objects);
+        if (cmd == "gc.verify") {
+            out += ",\"missing\":[";
+            for (size_t i = 0; i < r.missing.size(); ++i) {
+                if (i) out += ",";
+                out += "\"" + hash_to_hex(r.missing[i]) + "\"";
+            }
+            out += "]";
+        }
+        out += ",\"duration_ms\":" + std::to_string(r.duration_ms) + "}";
+        return out;
     }
 
     return json_err("unknown command");

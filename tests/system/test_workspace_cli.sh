@@ -6,6 +6,18 @@ LIST_ROOT="${ROOT}-list"
 BIN="${BIN:-$(pwd)/build/agentvfs}"
 SESSION="default"
 
+is_mounted() {
+    findmnt -rn --mountpoint "$1" >/dev/null 2>&1
+}
+
+unmount_if_present() {
+    local mnt="$1"
+    if is_mounted "$mnt"; then
+        fusermount3 -u "$mnt" 2>/dev/null ||
+            fusermount3 -uz "$mnt" 2>/dev/null || true
+    fi
+}
+
 cleanup() {
     "$BIN" workspace stop "$SESSION" --root "$ROOT" --no-checkpoint >/dev/null 2>&1 || true
     # Defensive: unmount any FUSE mounts we left behind. workspace stop will
@@ -13,20 +25,17 @@ cleanup() {
     # work when stop fails or isn't implemented yet.
     if [[ -d "$ROOT" ]]; then
         for mnt in "$ROOT"/*/mount; do
-            [[ -d "$mnt" ]] || continue
-            mountpoint -q "$mnt" && fusermount3 -u "$mnt" 2>/dev/null || true
+            unmount_if_present "$mnt"
         done
         # --mount override targets (placed at the root, not under <name>/mount).
         for mnt in "$ROOT"/custom-mnt-target "$ROOT"/init-custom-mnt; do
-            [[ -d "$mnt" ]] || continue
-            mountpoint -q "$mnt" && fusermount3 -u "$mnt" 2>/dev/null || true
+            unmount_if_present "$mnt"
         done
     fi
     rm -rf "$ROOT"
     if [[ -d "$LIST_ROOT" ]]; then
         for mnt in "$LIST_ROOT"/*/mount; do
-            [[ -d "$mnt" ]] || continue
-            mountpoint -q "$mnt" && fusermount3 -u "$mnt" 2>/dev/null || true
+            unmount_if_present "$mnt"
         done
         rm -rf "$LIST_ROOT"
     fi
@@ -52,7 +61,7 @@ STORE="$(get_kv store <<<"$START1")"
 [[ -d "$MNT" ]] || { echo "FAIL: mount dir missing"; exit 1; }
 [[ -S "$SOCK" ]] || { echo "FAIL: socket missing"; exit 1; }
 [[ -d "$STORE" ]] || { echo "FAIL: store dir missing"; exit 1; }
-mountpoint -q "$MNT" || { echo "FAIL: mountpoint not active"; exit 1; }
+is_mounted "$MNT" || { echo "FAIL: mountpoint not active"; exit 1; }
 
 START2="$("$BIN" workspace start "$SESSION" --root "$ROOT" --telemetry none)"
 MNT2="$(get_kv mount <<<"$START2")"
@@ -81,7 +90,7 @@ STOP="$("$BIN" workspace stop "$SESSION" --root "$ROOT")"
 echo "$STOP"
 grep -q '^status=stopped$' <<<"$STOP" || { echo "FAIL: stop did not report stopped"; exit 1; }
 grep -q '^checkpoint=' <<<"$STOP" || { echo "FAIL: stop did not report final checkpoint"; exit 1; }
-mountpoint -q "$MNT" && { echo "FAIL: mount still active after stop"; exit 1; }
+is_mounted "$MNT" && { echo "FAIL: mount still active after stop"; exit 1; }
 
 AUTO_SESSION="auto-fallback"
 AUTO_START="$("$BIN" workspace start "$AUTO_SESSION" --root "$ROOT")"
@@ -92,7 +101,7 @@ grep -q '^telemetry=none$' <<<"$AUTO_START" || {
     echo "FAIL: auto fallback telemetry=none missing"; echo "$AUTO_START"; exit 1;
 }
 AUTO_MNT="$(get_kv mount <<<"$AUTO_START")"
-mountpoint -q "$AUTO_MNT" || { echo "FAIL: auto fallback mount not active"; exit 1; }
+is_mounted "$AUTO_MNT" || { echo "FAIL: auto fallback mount not active"; exit 1; }
 "$BIN" workspace stop "$AUTO_SESSION" --root "$ROOT" --no-checkpoint >/dev/null
 
 STALE="stale-session"
@@ -152,18 +161,33 @@ for _ in 1 2 3 4 5 6 7 8 9 10; do
     sleep 0.1
 done
 
-mountpoint -q "$KILL_MNT" || { echo "FAIL: SIGKILL should leave mount stuck until fusermount3"; exit 1; }
+# Exercise the kernel-auto-unmount outcome deterministically when requested.
+# The normal run leaves the kernel's native post-SIGKILL behavior unchanged.
+if [[ "${AGENTVFS_TEST_AUTO_UNMOUNT_AFTER_KILL:-0}" == "1" ]]; then
+    unmount_if_present "$KILL_MNT"
+fi
+
+KILL_MOUNT_LINGERED=0
+if is_mounted "$KILL_MNT"; then
+    KILL_MOUNT_LINGERED=1
+fi
 
 set +e
 KILL_STOP_OUT="$("$BIN" workspace stop "$KILL_SESSION" --root "$ROOT" 2>&1)"
 KILL_STOP_RC=$?
 set -e
-[[ "$KILL_STOP_RC" -eq 1 ]] || { echo "FAIL: stop on unhealthy should exit 1, got $KILL_STOP_RC"; echo "$KILL_STOP_OUT"; exit 1; }
-grep -q "cannot checkpoint unhealthy" <<<"$KILL_STOP_OUT" || { echo "FAIL: missing refusal message"; echo "$KILL_STOP_OUT"; exit 1; }
-mountpoint -q "$KILL_MNT" || { echo "FAIL: refused stop should leave mount mounted"; exit 1; }
+if [[ "$KILL_MOUNT_LINGERED" -eq 1 ]]; then
+    [[ "$KILL_STOP_RC" -eq 1 ]] || { echo "FAIL: stop on unhealthy mounted workspace should exit 1, got $KILL_STOP_RC"; echo "$KILL_STOP_OUT"; exit 1; }
+    grep -q "cannot checkpoint unhealthy" <<<"$KILL_STOP_OUT" || { echo "FAIL: missing refusal message"; echo "$KILL_STOP_OUT"; exit 1; }
+    is_mounted "$KILL_MNT" || { echo "FAIL: refused stop should leave mount mounted"; exit 1; }
+else
+    [[ "$KILL_STOP_RC" -eq 0 ]] || { echo "FAIL: stop after kernel auto-unmount should succeed, got $KILL_STOP_RC"; echo "$KILL_STOP_OUT"; exit 1; }
+    grep -q '^status=stopped$' <<<"$KILL_STOP_OUT" || { echo "FAIL: stop after kernel auto-unmount did not report stopped"; echo "$KILL_STOP_OUT"; exit 1; }
+    is_mounted "$KILL_MNT" && { echo "FAIL: stop recreated an auto-unmounted mount"; exit 1; }
+fi
 
 "$BIN" workspace stop "$KILL_SESSION" --root "$ROOT" --no-checkpoint >/dev/null
-mountpoint -q "$KILL_MNT" && { echo "FAIL: --no-checkpoint stop should unmount"; exit 1; } || true
+is_mounted "$KILL_MNT" && { echo "FAIL: --no-checkpoint stop should unmount"; exit 1; } || true
 
 STATUS_AFTER_KILL="$("$BIN" workspace status "$KILL_SESSION" --root "$ROOT" || true)"
 grep -qE '^status=(stale|stopped)$' <<<"$STATUS_AFTER_KILL" || {
@@ -175,7 +199,7 @@ echo "$RECOVER_OUT"
 grep -q '^status=started$' <<<"$RECOVER_OUT" || { echo "FAIL: kill-recovery start did not succeed"; echo "$RECOVER_OUT"; exit 1; }
 RECOVER_MNT="$(get_kv mount <<<"$RECOVER_OUT")"
 [[ "$RECOVER_MNT" == "$KILL_MNT" ]] || { echo "FAIL: kill-recovery start changed mount path"; exit 1; }
-mountpoint -q "$RECOVER_MNT" || { echo "FAIL: kill-recovery start did not remount"; exit 1; }
+is_mounted "$RECOVER_MNT" || { echo "FAIL: kill-recovery start did not remount"; exit 1; }
 
 "$BIN" workspace stop "$KILL_SESSION" --root "$ROOT" --no-checkpoint >/dev/null
 
@@ -219,7 +243,7 @@ OVERRIDE_REPORTED="$(get_kv mount <<<"$OVERRIDE_START")"
 [[ "$OVERRIDE_REPORTED" == "$OVERRIDE_MNT" ]] || {
     echo "FAIL: --mount override not reported (got '$OVERRIDE_REPORTED')"; exit 1;
 }
-mountpoint -q "$OVERRIDE_MNT" || { echo "FAIL: override mount not active"; exit 1; }
+is_mounted "$OVERRIDE_MNT" || { echo "FAIL: override mount not active"; exit 1; }
 grep -q "\"mount\":\"$OVERRIDE_MNT\"" "$ROOT/$OVERRIDE_SESSION/session.json" || {
     echo "FAIL: session.json does not record override"; exit 1;
 }
@@ -248,7 +272,7 @@ grep -q "^mount=$OVERRIDE_MNT$" <<<"$CONFLICT_OUT" || {
 }
 
 "$BIN" workspace stop "$OVERRIDE_SESSION" --root "$ROOT" --no-checkpoint >/dev/null
-mountpoint -q "$OVERRIDE_MNT" && { echo "FAIL: stop did not unmount override"; exit 1; } || true
+is_mounted "$OVERRIDE_MNT" && { echo "FAIL: stop did not unmount override"; exit 1; } || true
 
 # Restart without --mount; must inherit the persisted override.
 STICKY_START="$("$BIN" workspace start "$OVERRIDE_SESSION" --root "$ROOT" --telemetry none)"
@@ -256,7 +280,7 @@ STICKY_REPORTED="$(get_kv mount <<<"$STICKY_START")"
 [[ "$STICKY_REPORTED" == "$OVERRIDE_MNT" ]] || {
     echo "FAIL: persisted override not reused (got '$STICKY_REPORTED')"; exit 1;
 }
-mountpoint -q "$OVERRIDE_MNT" || { echo "FAIL: sticky restart did not mount override"; exit 1; }
+is_mounted "$OVERRIDE_MNT" || { echo "FAIL: sticky restart did not mount override"; exit 1; }
 "$BIN" workspace stop "$OVERRIDE_SESSION" --root "$ROOT" --no-checkpoint >/dev/null
 rm -rf "$OVERRIDE_MNT"
 

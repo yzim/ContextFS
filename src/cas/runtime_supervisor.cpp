@@ -16,8 +16,13 @@ namespace cas {
 RuntimeSupervisor::RuntimeSupervisor(RuntimeProcessController* process_controller)
     : process_controller_(process_controller) {}
 
+bool RuntimeSupervisor::supported(std::string& error) const {
+    return process_controller_->supported(error);
+}
+
 bool RuntimeSupervisor::register_runtime(const RuntimeCreateRequest& request,
                                          std::string& error) {
+    if (!supported(error)) return false;
     std::lock_guard<std::mutex> lk(mu_);
     std::string id = request.runtime_id;
     if (id.empty()) id = make_runtime_id_locked();

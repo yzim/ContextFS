@@ -801,6 +801,11 @@ RuntimeSnapshotResult Daemon::snapshot_runtime(const RuntimeSnapshotRequest& req
     result.runtime_id = request.runtime_id;
     std::string error;
 
+    if (!runtime_supervisor_.supported(error)) {
+        result.error = error;
+        return result;
+    }
+
     // 1. Validate runtime, cooperativity, and branch resolvability.
     RuntimeStatus status;
     if (!runtime_supervisor_.status(request.runtime_id, status, error)) {
@@ -997,6 +1002,11 @@ RuntimeRestoreResult Daemon::restore_runtime(const std::string& union_state_id_h
     std::lock_guard<std::recursive_mutex> publish_lk(gc_publish_mu_);
     RuntimeRestoreResult result;
     std::string error;
+
+    if (!runtime_supervisor_.supported(error)) {
+        result.error = error;
+        return result;
+    }
 
     // 1. Parse the union-state id.
     Hash id;

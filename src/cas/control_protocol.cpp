@@ -1271,6 +1271,12 @@ std::string dispatch(Daemon& daemon,
     // the supervisor while Daemon::snapshot_runtime / restore_runtime drive
     // the matching side.
     // -----------------------------------------------------------------
+    if (cmd.rfind("runtime.", 0) == 0) {
+        std::string error;
+        if (!daemon.runtime_supervisor().supported(error))
+            return json_err(error);
+    }
+
     if (cmd == "runtime.create") {
         std::string rest; std::getline(iss, rest);
         RuntimeCreateRequest req;

@@ -96,6 +96,10 @@ struct RuntimeRestoreResult {
 class RuntimeProcessController {
 public:
     virtual ~RuntimeProcessController() = default;
+    virtual bool supported(std::string& error) const {
+        error.clear();
+        return true;
+    }
     virtual bool process_alive(int64_t pid) = 0;
     virtual bool freeze_process_group(int64_t pgid, std::string& error) = 0;
     virtual bool resume_process_group(int64_t pgid, std::string& error) = 0;
@@ -115,6 +119,7 @@ public:
 class RuntimeSupervisor {
 public:
     explicit RuntimeSupervisor(RuntimeProcessController* process_controller);
+    bool supported(std::string& error) const;
 
     // --- registry --------------------------------------------------------
     bool register_runtime(const RuntimeCreateRequest& request,

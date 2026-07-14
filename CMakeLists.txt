@@ -131,6 +131,7 @@ set(CAS_CORE_PORTABLE_SOURCES
     src/cas/agent_state.cpp
     src/cas/agent_state_service.cpp
     src/cas/runtime_supervisor.cpp
+    src/cas/runtime_process_unsupported.cpp
     src/cas/telemetry_event.cpp
     src/cas/telemetry_registry.cpp
     src/cas/control_protocol.cpp

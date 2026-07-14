@@ -156,6 +156,10 @@ add_executable(cas_test_telemetry_event unit/test_telemetry_event.cpp ../src/cas
 target_include_directories(cas_test_telemetry_event PRIVATE ../include ../src ../src/cas)
 target_compile_features(cas_test_telemetry_event PRIVATE cxx_std_17)
 
+add_executable(cas_test_runtime_process_unsupported
+    unit/test_runtime_process_unsupported.cpp)
+target_link_libraries(cas_test_runtime_process_unsupported PRIVATE cas_core)
+
 if(UNIX)
 add_executable(cas_test_telemetry_registry unit/test_telemetry_registry.cpp ../src/cas/telemetry_registry.cpp ../src/cas/telemetry_event.cpp)
 target_include_directories(cas_test_telemetry_registry PRIVATE ../include ../src ../src/cas)
@@ -314,6 +318,7 @@ set(AGENTVFS_STANDALONE_TEST_TARGETS
     cas_test_agent_state_service
     cas_test_runtime_supervisor
     cas_test_runtime_process_posix
+    cas_test_runtime_process_unsupported
     cas_test_branch_merge_commit
     cas_test_branch_merge_daemon
     cas_test_branch_persistence

@@ -10,7 +10,11 @@
 #include "object_store.h"
 #include "policy_installer.h"
 #include "refs.h"
+#ifdef _WIN32
+#include "runtime_process_unsupported.h"
+#else
 #include "runtime_process_posix.h"
+#endif
 #include "runtime_supervisor.h"
 #include "working_tree.h"
 #include "write_buffer.h"
@@ -26,6 +30,12 @@
 #include <vector>
 
 namespace cas {
+
+#ifdef _WIN32
+using PlatformRuntimeProcessController = UnsupportedRuntimeProcessController;
+#else
+using PlatformRuntimeProcessController = PosixRuntimeProcessController;
+#endif
 
 class TelemetryRegistry;
 class CgroupWatch;
@@ -276,7 +286,7 @@ private:
     // supervisor so it constructs first; the supervisor holds a raw pointer
     // to it. Both precede registry_ so they outlive any telemetry backend
     // that may capture `daemon`.
-    PosixRuntimeProcessController runtime_process_controller_;
+    PlatformRuntimeProcessController runtime_process_controller_;
     RuntimeSupervisor runtime_supervisor_;
 
     // Owned. Declared LAST so it is destroyed FIRST (members destruct in

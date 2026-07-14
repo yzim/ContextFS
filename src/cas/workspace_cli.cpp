@@ -646,13 +646,16 @@ static bool mountpoint_active(const std::string& path) {
     int rc = system(cmd.c_str());
     return rc == 0;
 #else
-    std::string cmd = "mountpoint -q ";
+    // mountpoint(1) stats the target and reports a system error for a
+    // disconnected FUSE mount. findmnt reads the mount table directly, so it
+    // can still identify the mount after the daemon has been killed.
+    std::string cmd = "findmnt -rn --mountpoint ";
     cmd += "'";
     for (char c : path) {
         if (c == '\'') cmd += "'\\''";
         else cmd.push_back(c);
     }
-    cmd += "'";
+    cmd += "' >/dev/null 2>&1";
     int rc = system(cmd.c_str());
     return rc == 0;
 #endif
